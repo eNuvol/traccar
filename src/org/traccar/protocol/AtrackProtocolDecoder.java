@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 - 2014 Anton Tananaev (anton.tananaev@gmail.com)
+ * Copyright 2013 - 2015 Anton Tananaev (anton.tananaev@gmail.com)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,133 +15,245 @@
  */
 package org.traccar.protocol;
 
-import java.nio.charset.Charset;
-import java.util.Date;
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
-import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
+import org.traccar.Context;
+import org.traccar.helper.DateBuilder;
+import org.traccar.helper.UnitsConverter;
 import org.traccar.model.Position;
+
+import java.net.SocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Date;
+import java.util.LinkedList;
+import java.util.List;
 
 public class AtrackProtocolDecoder extends BaseProtocolDecoder {
 
-    public AtrackProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
-    }
+    private static final int MIN_DATA_LENGTH = 40;
 
-    private String readImei(ChannelBuffer buf) {
-        int b = buf.readUnsignedByte();
-        StringBuilder imei = new StringBuilder();
-        imei.append(b & 0x0F);
-        for (int i = 0; i < 7; i++) {
-            b = buf.readUnsignedByte();
-            imei.append((b & 0xF0) >> 4);
-            imei.append(b & 0x0F);
+    private boolean longDate;
+    private boolean custom;
+    private String form;
+
+    public AtrackProtocolDecoder(AtrackProtocol protocol) {
+        super(protocol);
+
+        longDate = Context.getConfig().getBoolean(getProtocolName() + ".longDate");
+
+        custom = Context.getConfig().getBoolean(getProtocolName() + ".custom");
+        form = Context.getConfig().getString(getProtocolName() + ".form");
+        if (form != null) {
+            custom = true;
         }
-        return imei.toString();
     }
 
-    private static final int MSG_HEARTBEAT = 0x1A;
-    private static final int MSG_DATA = 0x10;
+    public void setLongDate(boolean longDate) {
+        this.longDate = longDate;
+    }
 
-    private static void sendResponse(Channel channel, long rawId, int index) {
+    public void setCustom(boolean custom) {
+        this.custom = custom;
+    }
+
+    private static void sendResponse(Channel channel, SocketAddress remoteAddress, long rawId, int index) {
         if (channel != null) {
             ChannelBuffer response = ChannelBuffers.directBuffer(12);
             response.writeShort(0xfe02);
             response.writeLong(rawId);
             response.writeShort(index);
-            channel.write(response);
+            channel.write(response, remoteAddress);
         }
     }
-    
+
+    private static String readString(ChannelBuffer buf) {
+        String result = null;
+        int index = buf.indexOf(buf.readerIndex(), buf.writerIndex(), (byte) 0);
+        if (index > buf.readerIndex()) {
+            result = buf.readBytes(index - buf.readerIndex()).toString(StandardCharsets.US_ASCII);
+        }
+        buf.readByte();
+        return result;
+    }
+
+    private void readCustomData(Position position, ChannelBuffer buf, String form) {
+        String[] keys = form.substring(1).split("%");
+        for (String key : keys) {
+            switch (key) {
+                case "SA":
+                    position.set(Position.KEY_SATELLITES, buf.readUnsignedByte());
+                    break;
+                case "MV":
+                    position.set(Position.KEY_POWER, buf.readUnsignedShort());
+                    break;
+                case "BV":
+                    position.set(Position.KEY_BATTERY, buf.readUnsignedShort());
+                    break;
+                case "GQ":
+                    position.set(Position.KEY_GSM, buf.readUnsignedByte());
+                    break;
+                case "CE":
+                    position.set(Position.KEY_CID, buf.readUnsignedInt());
+                    break;
+                case "LC":
+                    position.set(Position.KEY_LAC, buf.readUnsignedShort());
+                    break;
+                case "CN":
+                    buf.readUnsignedInt(); // mcc + mnc
+                    break;
+                case "RL":
+                    buf.readUnsignedByte(); // rxlev
+                    break;
+                case "PC":
+                    buf.readUnsignedInt(); // pulse count
+                    break;
+                case "AT":
+                    position.setAltitude(buf.readUnsignedInt());
+                    break;
+                case "RP":
+                    position.set(Position.KEY_RPM, buf.readUnsignedShort());
+                    break;
+                case "GS":
+                    buf.readUnsignedByte(); // gsm status
+                    break;
+                case "DT":
+                    position.set(Position.KEY_ARCHIVE, buf.readUnsignedByte() == 1);
+                    break;
+                case "VN":
+                    position.set(Position.KEY_VIN, readString(buf));
+                    break;
+                case "MF":
+                    buf.readUnsignedShort(); // mass air flow rate
+                    break;
+                case "EL":
+                    buf.readUnsignedByte(); // engine load
+                    break;
+                case "TR":
+                    position.set(Position.KEY_THROTTLE, buf.readUnsignedByte());
+                    break;
+                case "ET":
+                    buf.readUnsignedShort(); // engine coolant temp
+                    break;
+                case "FL":
+                    position.set(Position.KEY_FUEL, buf.readUnsignedByte());
+                    break;
+                case "ML":
+                    buf.readUnsignedByte(); // mil status
+                    break;
+                case "FC":
+                    buf.readUnsignedInt(); // fuel used
+                    break;
+                case "CI":
+                    readString(buf); // format string
+                    break;
+                case "AV1":
+                    position.set(Position.PREFIX_ADC + 1, buf.readUnsignedShort());
+                    break;
+                case "NC":
+                    readString(buf); // gsm neighbor cell info
+                    break;
+                case "SM":
+                    buf.readUnsignedShort(); // max speed between reports
+                    break;
+                case "GL":
+                    readString(buf); // google link
+                    break;
+                case "MA":
+                    readString(buf); // mac address
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
 
         ChannelBuffer buf = (ChannelBuffer) msg;
+
+        if (buf.getUnsignedShort(buf.readerIndex()) == 0xfe02) {
+            if (channel != null) {
+                channel.write(buf, remoteAddress); // keep-alive message
+            }
+            return null;
+        }
 
         buf.skipBytes(2); // prefix
         buf.readUnsignedShort(); // checksum
         buf.readUnsignedShort(); // length
         int index = buf.readUnsignedShort();
 
-        // Create new position
-        Position position = new Position();
-        ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("atrack");
-
-        // Get device id
-        long rawId = buf.readLong();
-        String id = String.valueOf(rawId);
-        try {
-            position.setDeviceId(getDataManager().getDeviceByImei(id).getId());
-        } catch(Exception error) {
-            Log.warning("Unknown device - " + id);
+        long id = buf.readLong();
+        if (!identify(String.valueOf(id), channel, remoteAddress)) {
             return null;
         }
-        
-        // Send acknowledgement
-        sendResponse(channel, rawId, index);
 
-        // Date and time
-        position.setTime(new Date(buf.readUnsignedInt() * 1000)); // gps time
-        buf.readUnsignedInt(); // rtc time
-        buf.readUnsignedInt(); // send time
+        sendResponse(channel, remoteAddress, id, index);
 
-        // Coordinates
-        position.setValid(true);
-        position.setLongitude(buf.readInt() * 0.000001);
-        position.setLatitude(buf.readInt() * 0.000001);
-        position.setAltitude(0.0);
+        List<Position> positions = new LinkedList<>();
 
-        // Course
-        position.setCourse((double) buf.readUnsignedShort());
-        
-        // Report type
-        extendedInfo.set("type", buf.readUnsignedByte());
-        
-        // Milage
-        extendedInfo.set("milage", buf.readUnsignedInt() * 0.1);
-        
-        // Accuracy
-        extendedInfo.set("hdop", buf.readUnsignedShort() * 0.1);
-        
-        // Input
-        extendedInfo.set("input", buf.readUnsignedByte());
+        while (buf.readableBytes() >= MIN_DATA_LENGTH) {
 
-        // Speed
-        position.setSpeed(buf.readUnsignedShort() * 0.539957);
+            Position position = new Position();
+            position.setProtocol(getProtocolName());
+            position.setDeviceId(getDeviceId());
 
-        // Output
-        extendedInfo.set("output", buf.readUnsignedByte());
+            if (longDate) {
 
-        // ADC
-        extendedInfo.set("adc", buf.readUnsignedShort() * 0.001);
+                DateBuilder dateBuilder = new DateBuilder()
+                        .setDate(buf.readUnsignedShort(), buf.readUnsignedByte(), buf.readUnsignedByte())
+                        .setTime(buf.readUnsignedByte(), buf.readUnsignedByte(), buf.readUnsignedByte());
+                position.setTime(dateBuilder.getDate());
 
-        // Driver
-        int length = 0;
-        while (buf.getByte(buf.readerIndex() + length) != 0) {
-            length += 1;
+                buf.skipBytes(7 + 7);
+
+
+            } else {
+
+                position.setFixTime(new Date(buf.readUnsignedInt() * 1000));
+                position.setDeviceTime(new Date(buf.readUnsignedInt() * 1000));
+                buf.readUnsignedInt(); // send time
+            }
+
+            position.setValid(true);
+            position.setLongitude(buf.readInt() * 0.000001);
+            position.setLatitude(buf.readInt() * 0.000001);
+            position.setCourse(buf.readUnsignedShort());
+
+            position.set(Position.KEY_TYPE, buf.readUnsignedByte());
+            position.set(Position.KEY_ODOMETER, buf.readUnsignedInt() * 0.1);
+            position.set(Position.KEY_HDOP, buf.readUnsignedShort() * 0.1);
+            position.set(Position.KEY_INPUT, buf.readUnsignedByte());
+
+            position.setSpeed(UnitsConverter.knotsFromKph(buf.readUnsignedShort()));
+
+            position.set(Position.KEY_OUTPUT, buf.readUnsignedByte());
+            position.set(Position.PREFIX_ADC + 1, buf.readUnsignedShort() * 0.001);
+
+            position.set("driver", readString(buf));
+
+            position.set(Position.PREFIX_TEMP + 1, buf.readShort() * 0.1);
+            position.set(Position.PREFIX_TEMP + 2, buf.readShort() * 0.1);
+
+            position.set("message", readString(buf));
+
+            if (custom) {
+                String form = this.form;
+                if (form == null) {
+                    form = readString(buf).substring("%CI".length());
+                }
+                readCustomData(position, buf, form);
+            }
+
+            positions.add(position);
+
         }
-        if (length != 0) {
-            extendedInfo.set("driver",
-                    buf.toString(buf.readerIndex(), length, Charset.defaultCharset()));
-            buf.skipBytes(length);
-        }
-        buf.readByte();
-        
-        // Temperature
-        extendedInfo.set("temperature1", buf.readShort() * 0.1);
-        extendedInfo.set("temperature2", buf.readShort() * 0.1);
-        
-        // TODO: text message
 
-        position.setExtendedInfo(extendedInfo.toString());
-        return position;
+        return positions;
     }
 
 }

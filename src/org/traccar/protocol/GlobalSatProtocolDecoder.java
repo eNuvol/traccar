@@ -15,49 +15,44 @@
  */
 package org.traccar.protocol;
 
-import java.util.Calendar;
-import java.util.Properties;
-import java.util.TimeZone;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
-import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
+import org.traccar.Context;
+import org.traccar.helper.DateBuilder;
+import org.traccar.helper.Parser;
+import org.traccar.helper.PatternBuilder;
+import org.traccar.helper.UnitsConverter;
 import org.traccar.model.Position;
+
+import java.net.SocketAddress;
+import java.util.regex.Pattern;
 
 public class GlobalSatProtocolDecoder extends BaseProtocolDecoder {
 
     private String format0;
     private String format1;
 
-    public GlobalSatProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
+    public GlobalSatProtocolDecoder(GlobalSatProtocol protocol) {
+        super(protocol);
 
-        // Initialize format strings
-        format0 = "TSPRXAB27GHKLMnaicz*U!";
-        format1 = "SARY*U!";
-        if (getServerManager() != null) {
-            Properties p = getServerManager().getProperties();
-            if (p.containsKey("globalsat.format0")) {
-                format0 = p.getProperty("globalsat.format0");
-            }
-            if (p.containsKey("globalsat.format1")) {
-                format1 = p.getProperty("globalsat.format1");
-            }
-        }
+        format0 = Context.getConfig().getString(getProtocolName() + ".format0", "TSPRXAB27GHKLMnaicz*U!");
+        format1 = Context.getConfig().getString(getProtocolName() + ".format1", "SARY*U!");
     }
-    
-    private Position decodeOriginal(Channel channel, String sentence) {
 
-        // Send acknowledgement
+    public void setFormat0(String format) {
+        format0 = format;
+    }
+
+    public void setFormat1(String format) {
+        format1 = format;
+    }
+
+    private Position decodeOriginal(Channel channel, SocketAddress remoteAddress, String sentence) {
+
         if (channel != null) {
             channel.write("ACK\r");
         }
 
-        // Message type
         String format;
         if (sentence.startsWith("GSr")) {
             format = format0;
@@ -68,102 +63,107 @@ public class GlobalSatProtocolDecoder extends BaseProtocolDecoder {
         }
 
         // Check that message contains required parameters
-        if (!format.contains("B") || !format.contains("S") ||
-            !(format.contains("1") || format.contains("2") || format.contains("3")) ||
-            !(format.contains("6") || format.contains("7") || format.contains("8"))) {
+        if (!format.contains("B") || !format.contains("S") || !(format.contains("1")
+                || format.contains("2") || format.contains("3")) || !(format.contains("6")
+                || format.contains("7") || format.contains("8"))) {
             return null;
         }
 
-        // Tokenise
         if (format.contains("*")) {
             format = format.substring(0, format.indexOf('*'));
             sentence = sentence.substring(0, sentence.indexOf('*'));
         }
         String[] values = sentence.split(",");
 
-        // Parse data
         Position position = new Position();
-        ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("globalsat");
+        position.setProtocol(getProtocolName());
 
-        for (int formatIndex = 0, valueIndex = 1; formatIndex < format.length() && valueIndex < values.length; formatIndex++) {
+        for (int formatIndex = 0, valueIndex = 1; formatIndex < format.length()
+                && valueIndex < values.length; formatIndex++) {
             String value = values[valueIndex];
 
-            switch(format.charAt(formatIndex)) {
+            switch (format.charAt(formatIndex)) {
                 case 'S':
-                    try {
-                        position.setDeviceId(getDataManager().getDeviceByImei(value).getId());
-                    } catch(Exception error) {
-                        Log.warning("Unknown device - " + value);
+                    if (!identify(value, channel, remoteAddress)) {
                         return null;
                     }
+                    position.setDeviceId(getDeviceId());
                     break;
                 case 'A':
                     if (value.isEmpty()) {
                         position.setValid(false);
                     } else {
-                        position.setValid(Integer.valueOf(value) != 1);
+                        position.setValid(Integer.parseInt(value) != 1);
                     }
                     break;
                 case 'B':
-                    Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-                    time.clear();
-                    time.set(Calendar.DAY_OF_MONTH, Integer.valueOf(value.substring(0, 2)));
-                    time.set(Calendar.MONTH, Integer.valueOf(value.substring(2, 4)) - 1);
-                    time.set(Calendar.YEAR, 2000 + Integer.valueOf(value.substring(4)));
+                    DateBuilder dateBuilder = new DateBuilder()
+                            .setDay(Integer.parseInt(value.substring(0, 2)))
+                            .setMonth(Integer.parseInt(value.substring(2, 4)))
+                            .setYear(Integer.parseInt(value.substring(4)));
                     value = values[++valueIndex];
-                    time.set(Calendar.HOUR, Integer.valueOf(value.substring(0, 2)));
-                    time.set(Calendar.MINUTE, Integer.valueOf(value.substring(2, 4)));
-                    time.set(Calendar.SECOND, Integer.valueOf(value.substring(4)));
-                    position.setTime(time.getTime());
+                    dateBuilder
+                            .setHour(Integer.parseInt(value.substring(0, 2)))
+                            .setMinute(Integer.parseInt(value.substring(2, 4)))
+                            .setSecond(Integer.parseInt(value.substring(4)));
+                    position.setTime(dateBuilder.getDate());
                     break;
                 case 'C':
                     valueIndex += 1;
                     break;
                 case '1':
-                    double longitude = Double.valueOf(value.substring(1));
-                    if (value.charAt(0) == 'W') longitude = -longitude;
+                    double longitude = Double.parseDouble(value.substring(1));
+                    if (value.charAt(0) == 'W') {
+                        longitude = -longitude;
+                    }
                     position.setLongitude(longitude);
                     break;
                 case '2':
-                    longitude = Double.valueOf(value.substring(4)) / 60;
-                    longitude += Integer.valueOf(value.substring(1, 4));
-                    if (value.charAt(0) == 'W') longitude = -longitude;
+                    longitude = Double.parseDouble(value.substring(4)) / 60;
+                    longitude += Integer.parseInt(value.substring(1, 4));
+                    if (value.charAt(0) == 'W') {
+                        longitude = -longitude;
+                    }
                     position.setLongitude(longitude);
                     break;
                 case '3':
-                    position.setLongitude(Double.valueOf(value) * 0.000001);
+                    position.setLongitude(Double.parseDouble(value) * 0.000001);
                     break;
                 case '6':
-                    double latitude = Double.valueOf(value.substring(1));
-                    if (value.charAt(0) == 'S') latitude = -latitude;
+                    double latitude = Double.parseDouble(value.substring(1));
+                    if (value.charAt(0) == 'S') {
+                        latitude = -latitude;
+                    }
                     position.setLatitude(latitude);
                     break;
                 case '7':
-                    latitude = Double.valueOf(value.substring(3)) / 60;
-                    latitude += Integer.valueOf(value.substring(1, 3));
-                    if (value.charAt(0) == 'S') latitude = -latitude;
+                    latitude = Double.parseDouble(value.substring(3)) / 60;
+                    latitude += Integer.parseInt(value.substring(1, 3));
+                    if (value.charAt(0) == 'S') {
+                        latitude = -latitude;
+                    }
                     position.setLatitude(latitude);
                     break;
                 case '8':
-                    position.setLatitude(Double.valueOf(value) * 0.000001);
+                    position.setLatitude(Double.parseDouble(value) * 0.000001);
                     break;
                 case 'G':
-                    position.setAltitude(Double.valueOf(value));
+                    position.setAltitude(Double.parseDouble(value));
                     break;
                 case 'H':
-                    position.setSpeed(Double.valueOf(value));
+                    position.setSpeed(Double.parseDouble(value));
                     break;
                 case 'I':
-                    position.setSpeed(Double.valueOf(value) * 0.539957);
+                    position.setSpeed(UnitsConverter.knotsFromKph(Double.parseDouble(value)));
                     break;
                 case 'J':
-                    position.setSpeed(Double.valueOf(value) * 0.868976);
+                    position.setSpeed(UnitsConverter.knotsFromMph(Double.parseDouble(value)));
                     break;
                 case 'K':
-                    position.setCourse(Double.valueOf(value));
+                    position.setCourse(Double.parseDouble(value));
                     break;
                 case 'N':
-                    extendedInfo.set("battery", Double.valueOf(value));
+                    position.set(Position.KEY_BATTERY, value);
                     break;
                 default:
                     // Unsupported
@@ -172,110 +172,73 @@ public class GlobalSatProtocolDecoder extends BaseProtocolDecoder {
 
             valueIndex += 1;
         }
-
-        position.setExtendedInfo(extendedInfo.toString());
         return position;
     }
-    
-    private static final Pattern pattern = Pattern.compile(
-            "\\$" +
-            "(\\d+)," +                    // IMEI
-            "\\d+," +                      // mode
-            "(\\d)," +                     // Fix
-            "(\\d{2})(\\d{2})(\\d{2})," +  // Date (DDMMYY)
-            "(\\d{2})(\\d{2})(\\d{2})," +  // Time (HHMMSS)
-            "([EW])" +
-            "(\\d{3})(\\d{2}\\.\\d+)," +   // Longitude (DDDMM.MMMM)
-            "([NS])" +
-            "(\\d{2})(\\d{2}\\.\\d+)," +   // Latitude (DDMM.MMMM)
-            "(\\d+\\.?\\d*)," +            // Altitude
-            "(\\d+\\.?\\d*)," +            // Speed
-            "(\\d+\\.?\\d*)," +            // Course
-            "(\\d+)," +                    // Satellites
-            "(\\d+\\.?\\d*)");             // HDOP
-    
-    private Position decodeAlternative(Channel channel, String sentence) {
 
-        // Parse message
-        Matcher parser = pattern.matcher(sentence);
+    private static final Pattern PATTERN = new PatternBuilder()
+            .text("$")
+            .number("(d+),")                     // imei
+            .number("d+,")                       // mode
+            .number("(d+),")                     // fix
+            .number("(dd)(dd)(dd),")             // date (ddmmyy)
+            .number("(dd)(dd)(dd),")             // time (hhmmss)
+            .expression("([EW])")
+            .number("(ddd)(dd.d+),")             // longitude (dddmm.mmmm)
+            .expression("([NS])")
+            .number("(dd)(dd.d+),")              // latitude (ddmm.mmmm)
+            .number("(d+.?d*),")                 // altitude
+            .number("(d+.?d*),")                 // speed
+            .number("(d+.?d*)?,")                // course
+            .number("(d+)[,*]")                  // satellites
+            .number("(d+.?d*)")                  // hdop
+            .compile();
+
+    private Position decodeAlternative(Channel channel, SocketAddress remoteAddress, String sentence) {
+
+        Parser parser = new Parser(PATTERN, sentence);
         if (!parser.matches()) {
             return null;
         }
 
-        // Create new position
         Position position = new Position();
-        ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("globalsat");
-        Integer index = 1;
+        position.setProtocol(getProtocolName());
 
-        // Identification
-        String imei = parser.group(index++);
-        try {
-            position.setDeviceId(getDataManager().getDeviceByImei(imei).getId());
-        } catch(Exception error) {
-            Log.warning("Unknown device - " + imei);
+        if (!identify(parser.next(), channel, remoteAddress)) {
             return null;
         }
+        position.setDeviceId(getDeviceId());
 
-        // Validity
-        position.setValid(parser.group(index++).compareTo("1") != 0);
-        
-        // Time
-        Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-        time.clear();
-        time.set(Calendar.DAY_OF_MONTH, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.MONTH, Integer.valueOf(parser.group(index++)) - 1);
-        time.set(Calendar.YEAR, 2000 + Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.HOUR, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.MINUTE, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.SECOND, Integer.valueOf(parser.group(index++)));
-        position.setTime(time.getTime());
+        position.setValid(!parser.next().equals("1"));
 
-        // Longitude
-        String hemisphere = parser.group(index++);
-        Double longitude = Double.valueOf(parser.group(index++));
-        longitude += Double.valueOf(parser.group(index++)) / 60;
-        if (hemisphere.compareTo("W") == 0) longitude = -longitude;
-        position.setLongitude(longitude);
+        DateBuilder dateBuilder = new DateBuilder()
+                .setDateReverse(parser.nextInt(), parser.nextInt(), parser.nextInt())
+                .setTime(parser.nextInt(), parser.nextInt(), parser.nextInt());
+        position.setTime(dateBuilder.getDate());
 
-        // Latitude
-        hemisphere = parser.group(index++);
-        Double latitude = Double.valueOf(parser.group(index++));
-        latitude += Double.valueOf(parser.group(index++)) / 60;
-        if (hemisphere.compareTo("S") == 0) latitude = -latitude;
-        position.setLatitude(latitude);
+        position.setLongitude(parser.nextCoordinate(Parser.CoordinateFormat.HEM_DEG_MIN));
+        position.setLatitude(parser.nextCoordinate(Parser.CoordinateFormat.HEM_DEG_MIN));
+        position.setAltitude(parser.nextDouble());
+        position.setSpeed(parser.nextDouble());
+        position.setCourse(parser.nextDouble());
 
-        // Altitude
-        position.setAltitude(Double.valueOf(parser.group(index++)));
+        position.set(Position.KEY_SATELLITES, parser.nextInt());
+        position.set(Position.KEY_HDOP, parser.next());
 
-        // Speed
-        position.setSpeed(Double.valueOf(parser.group(index++)));
-
-        // Course
-        position.setCourse(Double.valueOf(parser.group(index++)));
-
-        // Satellites
-        extendedInfo.set("satellites", Integer.valueOf(parser.group(index++)));
-
-        // HDOP
-        extendedInfo.set("hdop", parser.group(index++));
-
-        position.setExtendedInfo(extendedInfo.toString());
         return position;
     }
 
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
 
         String sentence = (String) msg;
-        
+
         if (sentence.startsWith("GS")) {
-            return decodeOriginal(channel, sentence);
+            return decodeOriginal(channel, remoteAddress, sentence);
         } else if (sentence.startsWith("$")) {
-            return decodeAlternative(channel, sentence);
+            return decodeAlternative(channel, remoteAddress, sentence);
         }
-        
+
         return null;
     }
 

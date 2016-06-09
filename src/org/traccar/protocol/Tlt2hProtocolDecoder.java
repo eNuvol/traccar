@@ -15,141 +15,94 @@
  */
 package org.traccar.protocol;
 
-import java.util.Calendar;
+import org.jboss.netty.channel.Channel;
+import org.traccar.BaseProtocolDecoder;
+import org.traccar.helper.DateBuilder;
+import org.traccar.helper.Parser;
+import org.traccar.helper.PatternBuilder;
+import org.traccar.model.Position;
+
+import java.net.SocketAddress;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.TimeZone;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
-import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
-import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
-import org.traccar.model.Position;
 
 public class Tlt2hProtocolDecoder extends BaseProtocolDecoder {
 
-    public Tlt2hProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
+    public Tlt2hProtocolDecoder(Tlt2hProtocol protocol) {
+        super(protocol);
     }
 
-    static private Pattern patternHeader = Pattern.compile(
-            "#(\\d+)#" +                   // IMEI
-            "[^#]+#" +
-            "\\d+#" +
-            "([^#]+)#" +                   // Status
-            "\\d+");                       // Number of records
+    private static final Pattern PATTERN_HEADER = new PatternBuilder()
+            .number("#(d+)#")                    // imei
+            .expression("[^#]*#")
+            .number("d+#")
+            .expression("([^#]+)#")              // status
+            .number("d+")                        // number of records
+            .compile();
 
-    static private Pattern patternPosition = Pattern.compile(
-            "#([0-9a-f]+)?" +              // Cell info
-            "\\$GPRMC," +
-            "(\\d{2})(\\d{2})(\\d{2})\\.(\\d+)," + // Time (HHMMSS.SSS)
-            "([AV])," +                    // Validity
-            "(\\d+)(\\d{2}\\.\\d+)," +     // Latitude (DDMM.MMMM)
-            "([NS])," +
-            "(\\d+)(\\d{2}\\.\\d+)," +     // Longitude (DDDMM.MMMM)
-            "([EW])," +
-            "(\\d+\\.\\d{2})?," +          // Speed
-            "(\\d+\\.\\d{2})?," +          // Course
-            "(\\d{2})(\\d{2})(\\d{2})" +   // Date (DDMMYY)
-            ".+");                         // Other (Checksumm)
+    private static final Pattern PATTERN_POSITION = new PatternBuilder()
+            .number("#(x+)?")                    // cell info
+            .text("$GPRMC,")
+            .number("(dd)(dd)(dd).(d+),")        // time
+            .expression("([AV]),")               // validity
+            .number("(d+)(dd.d+),")              // latitude
+            .expression("([NS]),")
+            .number("(d+)(dd.d+),")              // longitude
+            .number("([EW]),")
+            .number("(d+.?d*)?,")                // speed
+            .number("(d+.?d*)?,")                // course
+            .number("(dd)(dd)(dd)")              // date (ddmmyy)
+            .any()
+            .compile();
 
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
 
         String sentence = (String) msg;
+        sentence = sentence.trim();
 
-        // Decode header
         String header = sentence.substring(0, sentence.indexOf('\r'));
-        Matcher parser = patternHeader.matcher(header);
+        Parser parser = new Parser(PATTERN_HEADER, header);
         if (!parser.matches()) {
             return null;
         }
 
-        // Get device identifier
-        String imei = parser.group(1);
-        long deviceId;
-        try {
-            deviceId = getDataManager().getDeviceByImei(imei).getId();
-        } catch(Exception error) {
-            Log.warning("Unknown device - " + imei);
+        if (!identify(parser.next(), channel, remoteAddress)) {
             return null;
         }
-        
-        // Get status
-        String status = parser.group(2);
-        
+
+        String status = parser.next();
+
         String[] messages = sentence.substring(sentence.indexOf('\n') + 1).split("\r\n");
-        List<Position> positions = new LinkedList<Position>();
-        
+        List<Position> positions = new LinkedList<>();
+
         for (String message : messages) {
-            parser = patternPosition.matcher(message);
+            parser = new Parser(PATTERN_POSITION, message);
             if (parser.matches()) {
+
                 Position position = new Position();
-                ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("tlt2h");
-                position.setDeviceId(deviceId);
+                position.setProtocol(getProtocolName());
+                position.setDeviceId(getDeviceId());
 
-                Integer index = 1;
-                
-                // Cell
-                extendedInfo.set("cell", parser.group(index++));
+                parser.next(); // base station info
 
-                // Time
-                Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-                time.clear();
-                time.set(Calendar.HOUR, Integer.valueOf(parser.group(index++)));
-                time.set(Calendar.MINUTE, Integer.valueOf(parser.group(index++)));
-                time.set(Calendar.SECOND, Integer.valueOf(parser.group(index++)));
-                index += 1; // Skip milliseconds
+                DateBuilder dateBuilder = new DateBuilder()
+                        .setTime(parser.nextInt(), parser.nextInt(), parser.nextInt());
+                parser.next();
 
-                // Validity
-                position.setValid(parser.group(index++).compareTo("A") == 0 ? true : false);
+                position.setValid(parser.next().equals("A"));
+                position.setLatitude(parser.nextCoordinate());
+                position.setLongitude(parser.nextCoordinate());
+                position.setSpeed(parser.nextDouble());
+                position.setCourse(parser.nextDouble());
 
-                // Latitude
-                Double latitude = Double.valueOf(parser.group(index++));
-                latitude += Double.valueOf(parser.group(index++)) / 60;
-                if (parser.group(index++).compareTo("S") == 0) latitude = -latitude;
-                position.setLatitude(latitude);
+                dateBuilder.setDateReverse(parser.nextInt(), parser.nextInt(), parser.nextInt());
+                position.setTime(dateBuilder.getDate());
 
-                // Longitude
-                Double longitude = Double.valueOf(parser.group(index++));
-                longitude += Double.valueOf(parser.group(index++)) / 60;
-                if (parser.group(index++).compareTo("W") == 0) longitude = -longitude;
-                position.setLongitude(longitude);
+                position.set(Position.KEY_STATUS, status);
 
-                // Speed
-                String speed = parser.group(index++);
-                if (speed != null) {
-                    position.setSpeed(Double.valueOf(speed));
-                } else {
-                    position.setSpeed(0.0);
-                }
-
-                // Course
-                String course = parser.group(index++);
-                if (course != null) {
-                    position.setCourse(Double.valueOf(course));
-                } else {
-                    position.setCourse(0.0);
-                }
-
-                // Date
-                time.set(Calendar.DAY_OF_MONTH, Integer.valueOf(parser.group(index++)));
-                time.set(Calendar.MONTH, Integer.valueOf(parser.group(index++)) - 1);
-                time.set(Calendar.YEAR, 2000 + Integer.valueOf(parser.group(index++)));
-                position.setTime(time.getTime());
-
-                // Altitude
-                position.setAltitude(0.0);
-                
-                // Status
-                extendedInfo.set("status", status);
-                
-                position.setExtendedInfo(extendedInfo.toString());
                 positions.add(position);
             }
         }

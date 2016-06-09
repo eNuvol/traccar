@@ -15,32 +15,40 @@
  */
 package org.traccar.protocol;
 
-import java.nio.charset.Charset;
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.channel.Channel;
 import org.jboss.netty.channel.ChannelHandlerContext;
 import org.jboss.netty.handler.codec.frame.FrameDecoder;
+import org.traccar.helper.StringFinder;
+
+import java.nio.charset.StandardCharsets;
 
 public class TotemFrameDecoder extends FrameDecoder {
 
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx,
-            Channel channel,
-            ChannelBuffer buf) throws Exception {
-        
-        // Check minimum length
+            ChannelHandlerContext ctx, Channel channel, ChannelBuffer buf) throws Exception {
+
         if (buf.readableBytes() < 10) {
             return null;
         }
-        
-        // Trim end line
-        if (buf.getUnsignedShort(buf.readerIndex()) == 0x0d0a) {
-            buf.skipBytes(2);
+
+        int beginIndex = buf.indexOf(buf.readerIndex(), buf.writerIndex(), new StringFinder("$$"));
+        if (beginIndex == -1) {
+            return null;
+        } else if (beginIndex > buf.readerIndex()) {
+            buf.readerIndex(beginIndex);
         }
 
-        // Read message
-        int length = Integer.parseInt(buf.toString(buf.readerIndex() + 2, 2, Charset.defaultCharset()), 16);
+        int length;
+
+        int flagIndex = buf.indexOf(buf.readerIndex(), buf.writerIndex(), new StringFinder("AA"));
+        if (flagIndex != -1 && flagIndex - beginIndex == 6) {
+            length = Integer.parseInt(buf.toString(buf.readerIndex() + 2, 4, StandardCharsets.US_ASCII));
+        } else {
+            length = Integer.parseInt(buf.toString(buf.readerIndex() + 2, 2, StandardCharsets.US_ASCII), 16);
+        }
+
         if (length <= buf.readableBytes()) {
             return buf.readBytes(length);
         }

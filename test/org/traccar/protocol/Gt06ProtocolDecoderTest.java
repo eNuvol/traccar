@@ -1,47 +1,78 @@
 package org.traccar.protocol;
 
-import org.traccar.helper.TestDataManager;
-import org.jboss.netty.buffer.ChannelBuffers;
-import static org.traccar.helper.DecoderVerifier.verify;
-import static org.junit.Assert.assertNull;
 import org.junit.Test;
-import org.traccar.helper.ChannelBufferTools;
-import static org.traccar.helper.DecoderVerifier.verify;
+import org.traccar.ProtocolTest;
 
-public class Gt06ProtocolDecoderTest {
+public class Gt06ProtocolDecoderTest extends ProtocolTest {
 
     @Test
     public void testDecode() throws Exception {
 
-        Gt06ProtocolDecoder decoder = new Gt06ProtocolDecoder(null);
-        decoder.setDataManager(new TestDataManager());
+        Gt06ProtocolDecoder decoder = new Gt06ProtocolDecoder(new Gt06Protocol());
 
-        int[] buf1 = {0x78,0x78,0x11,0x01,0x01,0x23,0x45,0x67,(byte)0x89,0x01,0x23,0x45,0x10,0x0B,0x32,0x01,0x00,0x01,0x71,(byte)0x93,0x0D,0x0A};
-        assertNull(decoder.decode(null, null, ChannelBuffers.wrappedBuffer(ChannelBufferTools.convertArray(buf1))));
+        verifyNothing(decoder, binary(
+                "787805120099abec0d0a"));
 
-        int[] buf2 = {0x78,0x78,0x1F,0x12,0x0B,0x08,0x1D,0x11,0x2E,0x10,(byte)0xCC,0x02,0x7A,(byte)0xC7,(byte)0xEB,0x0C,0x46,0x58,0x49,0x00,0x14,(byte)0x8F,0x01,(byte)0xCC,0x00,0x28,0x7D,0x00,0x1F,(byte)0xB8,0x00,0x03,(byte)0x80,(byte)0x81,0x0D,0x0A};
-        verify(decoder.decode(null, null, ChannelBuffers.wrappedBuffer(ChannelBufferTools.convertArray(buf2))));
+        verifyNothing(decoder, binary(
+                "78780D01086471700328358100093F040D0A"));
 
-        int[] buf3 = {0x78,0x78,0x0D,0x01,0x08,0x64,0x71,0x70,0x03,0x28,0x35,(byte)0x81,0x00,0x09,0x3F,0x04,0x0D,0x0A};
-        assertNull(decoder.decode(null, null, ChannelBuffers.wrappedBuffer(ChannelBufferTools.convertArray(buf3))));
+        verifyNotNull(decoder, binary(
+                "787866150000000000416c726561647920696e20746865207374617465206f66206675656c20737570706c7920746f20726573756d652c74686520636f6d6d616e64206973206e6f742072756e6e696e672100000000000000000000000000000000000001001981e50d0a"));
 
-        int[] buf4 = {0x78,0x78,0x0D,0x01,0x01,0x23,0x45,0x67,(byte)0x89,0x01,0x23,0x45,0x00,0x01,(byte)0x8C,(byte)0xDD,0x0D,0x0A};
-        assertNull(decoder.decode(null, null, ChannelBuffers.wrappedBuffer(ChannelBufferTools.convertArray(buf4))));
+        verifyAttributes(decoder, binary(
+                "78782d152500000000437574206f666620746865206675656c20737570706c793a2053756363657373210002013b898a0d0a"));
 
-        int[] buf5 = {0x78,0x78,0x0d,0x01,0x03,0x53,0x41,(byte)0x90,0x36,0x06,0x60,0x61,0x00,0x03,(byte)0xc3,(byte)0xdf,0x0d,0x0a};
-        assertNull(decoder.decode(null, null, ChannelBuffers.wrappedBuffer(ChannelBufferTools.convertArray(buf5))));
+        verifyAttributes(decoder, binary(
+                "787829152100000000526573746f7265206675656c20737570706c793a2053756363657373210002014077ce0d0a"));
 
-        int[] buf6 = {0x78,0x78,0x19,0x10,0x0B,0x03,0x1A,0x0B,0x1B,0x31,(byte)0xCC,0x02,0x7A,(byte)0xC7,(byte)0xFD,0x0C,0x46,0x57,(byte)0xBF,0x01,0x15,0x21,0x00,0x01,0x00,0x1C,(byte)0xC6,0x07,0x0D,0x0A};
-        verify(decoder.decode(null, null, ChannelBuffers.wrappedBuffer(ChannelBufferTools.convertArray(buf6))));
+        verifyNothing(decoder, binary(
+                "78780D01012345678901234500018CDD0D0A"));
 
-        int[] buf7 = {78,0x78,0x21,0x12,0x0C,0x01,0x0C,0x0F,0x15,0x1F,(byte)0xCF,0x02,0x7A,(byte)0xC8,(byte)0x84,0x0C,0x46,0x57,(byte)0xEC,0x00,0x14,0x00,0x01,(byte)0xCC,0x00,0x28,0x7D,0x00,0x1F,0x72,0x00,0x01,0x00,0x0F,0x53,(byte)0xA0,0x0D,0x0A};
-        verify(decoder.decode(null, null, ChannelBuffers.wrappedBuffer(ChannelBufferTools.convertArray(buf7))));
+        verifyNothing(decoder, binary(
+                "78780d0103534190360660610003c3df0d0a"));
 
-        int[] buf8 = {0x78,0x78,0x25,0x16,0x0B,0x05,0x1B,0x09,0x35,0x23,(byte)0xCF,0x02,0x7A,(byte)0xC8,0x36,0x0C,0x46,0x57,(byte)0xB3,0x00,0x14,0x00,0x09,0x01,(byte)0xCC,0x00,0x26,0x6A,0x00,0x1E,0x17,0x40,0x05,0x04,0x00,0x02,0x00,0x08,(byte)0xD7,(byte)0xB1,0x0D,0x0A};
-        verify(decoder.decode(null, null, ChannelBuffers.wrappedBuffer(ChannelBufferTools.convertArray(buf8))));
-        
-        int[] buf9 = {0x78,0x78,0x19,0x10,0x0e,0x01,0x09,0x03,0x23,0x0e,0xc8,0x03,0xae,0x32,0xa6,0x06,0x53,0xcd,0xed,0x00,0x18,0x00,0x00,0x02,0x00,0x72,0xfe,0xb7,0x0d,0x0a};
-        verify(decoder.decode(null, null, ChannelBuffers.wrappedBuffer(ChannelBufferTools.convertArray(buf9))));
+        verifyAttributes(decoder, binary(
+                "78780a13440604000201baaf540d0a"));
+
+        verifyPosition(decoder, binary(
+                "78781f120f0a140e150bc505e51e780293a9e800540000f601006e0055da00035f240d0a"),
+                position("2015-10-20 14:21:11.000", true, 54.94535, 24.01762));
+
+        verifyPosition(decoder, binary(
+                "787823120f081b121d37cb01c8e2cc08afd3c020d50201940701d600a1190041ee100576d1470d0a"));
+
+        verifyPosition(decoder, binary(
+                "78781F120B081D112E10CC027AC7EB0C46584900148F01CC00287D001FB8000380810D0A"));
+
+        verifyPosition(decoder, binary(
+                "787819100B031A0B1B31CC027AC7FD0C4657BF0115210001001CC6070D0A"));
+
+        verifyPosition(decoder, binary(
+                "787821120C010C0F151FCF027AC8840C4657EC00140001CC00287D001F720001000F53A00D0A"));
+
+        verifyPosition(decoder, binary(
+                "787825160B051B093523CF027AC8360C4657B30014000901CC00266A001E1740050400020008D7B10D0A"));
+
+        verifyPosition(decoder, binary(
+                "787819100e010903230ec803ae32a60653cded00180000020072feb70d0a"));
+
+        verifyPosition(decoder, binary(
+                "7878471e0e03110b0511c501c664fd074db73f0218a602e003433a002fed40433a0056e14e433a0056104e433a0056fd53433a002eed55433a007e4b57433a002ee25aff00020120f6720d0a"));
+
+        verifyNothing(decoder, binary(
+                "7979005bfd0358899050927725004c0020bf984358df603b2ea3a339e54335013a5b56455253494f4e5d47543036445f32305f3630444d325f423235455f5631355f574d5b4255494c445d323031332f31322f32382031353a3234002a3b240d0a7979005bfd0358899050927725004c0020bf984358df603b2ea3a339e54335013a5b56455253494f4e5d47543036445f32305f3630444d325f423235455f5631355f574d5b4255494c445d323031332f31322f32382031353a3234002d4f9b0d0a7979005bfd0358899050927725004c0020bf984358df603b2ea3a339e54335013a5b56455253494f4e5d47543036445f32305f3630444d325f423235455f5631355f574d5b4255494c445d323031332f31322f32382031353a3234003084ff0d0a"));
+
+        verifyNothing(decoder, binary(
+                "78788b818300000000534545464e2626004f04220045042626262b37393035343031353534362626262626260410041b0415041a04210415041926262b373930363433333031313526260410043d044f26262b373936303437383430363426260412043e0432043026262b373932383834373738383126262626262626262626262626262626232300020022155d0d0a"));
+
+        verifyPosition(decoder, binary(
+                "787822220e0914160f07c9021a362805090a7800d8b802d402c30e00a98a0105010213f4bb0d0a"));
+
+        verifyNothing(decoder, binary(
+                "787811010864717003664467100f190a0002c6d20d0a"));
+
+        verifyNothing(decoder, binary(
+                "787811010123456789012345100B3201000171930D0A"));
 
     }
 

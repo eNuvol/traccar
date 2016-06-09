@@ -15,149 +15,99 @@
  */
 package org.traccar.protocol;
 
-import java.util.Calendar;
-import java.util.TimeZone;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
-import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
+import org.traccar.helper.DateBuilder;
+import org.traccar.helper.Parser;
+import org.traccar.helper.PatternBuilder;
 import org.traccar.model.Position;
+
+import java.net.SocketAddress;
+import java.util.regex.Pattern;
 
 public class V680ProtocolDecoder extends BaseProtocolDecoder {
 
-    private Long deviceId;
-
-    public V680ProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
+    public V680ProtocolDecoder(V680Protocol protocol) {
+        super(protocol);
     }
 
-    private static final Pattern pattern = Pattern.compile(
-            "(?:#(\\d+)#" +                // IMEI
-            "([^#]*)#)?" +                 // User
-            "(\\d+)#" +                    // Fix
-            "([^#]+)#" +                   // Password
-            "[^#]+#" +
-            "(\\d+)#" +                    // Packet number
-            "([^#]+)?#?" +                 // GSM base station
-            "(?:[^#]+#)?" +
-            "(\\d+)(\\d{2}\\.\\d+)," +     // Longitude (DDDMM.MMMM)
-            "([EW])," +
-            "(\\d+)(\\d{2}\\.\\d+)," +     // Latitude (DDMM.MMMM)
-            "([NS])," +
-            "(\\d+\\.\\d+)," +             // Speed
-            "(\\d+\\.?\\d*)?#" +           // Course
-            "(\\d{2})(\\d{2})(\\d{2})#" +  // Date (DDMMYY)
-            "(\\d{2})(\\d{2})(\\d{2})" +   // Time (HHMMSS)
-            ".*");
+    private static final Pattern PATTERN = new PatternBuilder()
+            .groupBegin()
+            .number("#(d+)#")                    // imei
+            .expression("([^#]*)#")              // user
+            .groupEnd("?")
+            .number("(d+)#")                     // fix
+            .expression("([^#]+)#")              // password
+            .expression("([^#]+)#")              // event
+            .number("(d+)#")                     // packet number
+            .expression("([^#]+)?#?")            // gsm base station
+            .expression("(?:[^#]+#)?")
+            .number("(d+)?(dd.d+),")             // longitude
+            .expression("([EW]),")
+            .number("(d+)?(dd.d+),")             // latitude
+            .expression("([NS]),")
+            .number("(d+.d+),")                  // speed
+            .number("(d+.?d*)?#")                // course
+            .number("(dd)(dd)(dd)#")             // date
+            .number("(dd)(dd)(dd)")              // time
+            .any()
+            .compile();
 
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
 
         String sentence = (String) msg;
-        
-        // Detect device ID
+        sentence = sentence.trim();
+
         if (sentence.length() == 16) {
-            String imei = sentence.substring(1, sentence.length());
-            try {
-                deviceId = getDataManager().getDeviceByImei(imei).getId();
-            } catch(Exception error) {
-                Log.warning("Unknown device - " + imei);
-            }
+
+            identify(sentence.substring(1, sentence.length()), channel, remoteAddress);
+
         } else {
 
-            // Parse message
-            Matcher parser = pattern.matcher(sentence);
+            Parser parser = new Parser(PATTERN, sentence);
             if (!parser.matches()) {
                 return null;
             }
 
-            // Create new position
             Position position = new Position();
-            ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("v680");
-            Integer index = 1;
+            position.setProtocol(getProtocolName());
 
-            // Get device by IMEI
-            String imei = parser.group(index++);
-            if (imei != null) {
-                try {
-                    deviceId = getDataManager().getDeviceByImei(imei).getId();
-                } catch(Exception error) {
-                    Log.warning("Unknown device - " + imei);
-                    return null;
-                }
+            if (parser.hasNext()) {
+                identify(parser.next(), channel, remoteAddress);
             }
-            if (deviceId == null) {
+            if (!hasDeviceId()) {
                 return null;
             }
-            position.setDeviceId(deviceId);
+            position.setDeviceId(getDeviceId());
 
-            // User
-            extendedInfo.set("user", parser.group(index++));
+            position.set("user", parser.next());
+            position.setValid(parser.nextInt() > 0);
+            position.set("password", parser.next());
+            position.set(Position.KEY_EVENT, parser.next());
+            position.set("packet", parser.next());
+            position.set(Position.KEY_GSM, parser.next());
 
-            // Validity
-            position.setValid(Integer.valueOf(parser.group(index++)) > 0);
+            position.setLongitude(parser.nextCoordinate());
+            position.setLatitude(parser.nextCoordinate());
+            position.setSpeed(parser.nextDouble());
+            position.setCourse(parser.nextDouble());
 
-            // Password
-            extendedInfo.set("password", parser.group(index++));
-
-            // Packet number
-            extendedInfo.set("packet", parser.group(index++));
-
-            // GSM base station
-            extendedInfo.set("gsm", parser.group(index++));
-
-            // Longitude
-            Double longitude = Double.valueOf(parser.group(index++));
-            longitude += Double.valueOf(parser.group(index++)) / 60;
-            if (parser.group(index++).compareTo("W") == 0) longitude = -longitude;
-            position.setLongitude(longitude);
-
-            // Latitude
-            Double latitude = Double.valueOf(parser.group(index++));
-            latitude += Double.valueOf(parser.group(index++)) / 60;
-            if (parser.group(index++).compareTo("S") == 0) latitude = -latitude;
-            position.setLatitude(latitude);
-
-            // Altitude
-            position.setAltitude(0.0);
-
-            // Speed and Course
-            position.setSpeed(Double.valueOf(parser.group(index++)));
-            String course = parser.group(index++);
-            if (course != null) {
-                position.setCourse(Double.valueOf(course));
-            } else {
-                position.setCourse(0.0);
-            }
-
-            // Date
-            Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-            time.clear();
-            int day = Integer.valueOf(parser.group(index++));
-            int month = Integer.valueOf(parser.group(index++));
+            int day = parser.nextInt();
+            int month = parser.nextInt();
             if (day == 0 && month == 0) {
                 return null; // invalid date
             }
-            time.set(Calendar.DAY_OF_MONTH, day);
-            time.set(Calendar.MONTH, month - 1);
-            time.set(Calendar.YEAR, 2000 + Integer.valueOf(parser.group(index++)));
 
-            // Time
-            time.set(Calendar.HOUR, Integer.valueOf(parser.group(index++)));
-            time.set(Calendar.MINUTE, Integer.valueOf(parser.group(index++)));
-            time.set(Calendar.SECOND, Integer.valueOf(parser.group(index++)));
-            position.setTime(time.getTime());
+            DateBuilder dateBuilder = new DateBuilder()
+                    .setDate(parser.nextInt(), month, day)
+                    .setTime(parser.nextInt(), parser.nextInt(), parser.nextInt());
+            position.setTime(dateBuilder.getDate());
 
-            position.setExtendedInfo(extendedInfo.toString());
             return position;
         }
-        
+
         return null;
     }
 

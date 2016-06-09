@@ -15,16 +15,9 @@
  */
 package org.traccar.protocol;
 
-import java.nio.ByteOrder;
-import java.nio.charset.Charset;
-import java.util.Calendar;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.TimeZone;
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
 import org.jboss.netty.handler.codec.http.DefaultHttpResponse;
 import org.jboss.netty.handler.codec.http.HttpRequest;
 import org.jboss.netty.handler.codec.http.HttpResponse;
@@ -32,15 +25,20 @@ import org.jboss.netty.handler.codec.http.HttpResponseStatus;
 import org.jboss.netty.handler.codec.http.HttpVersion;
 import org.jboss.netty.handler.codec.http.QueryStringDecoder;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
-import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
+import org.traccar.helper.BitUtil;
+import org.traccar.helper.DateBuilder;
 import org.traccar.model.Position;
 
+import java.net.SocketAddress;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedList;
+import java.util.List;
+
 public class PiligrimProtocolDecoder extends BaseProtocolDecoder {
-    
-    public PiligrimProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
+
+    public PiligrimProtocolDecoder(PiligrimProtocol protocol) {
+        super(protocol);
     }
 
     private void sendResponse(Channel channel, String message) {
@@ -48,138 +46,116 @@ public class PiligrimProtocolDecoder extends BaseProtocolDecoder {
             HttpResponse response = new DefaultHttpResponse(
                     HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
             response.setContent(ChannelBuffers.copiedBuffer(
-                    ByteOrder.BIG_ENDIAN, message, Charset.defaultCharset()));
+                    ByteOrder.BIG_ENDIAN, message, StandardCharsets.US_ASCII));
             channel.write(response);
         }
     }
 
-    private static final int MSG_GPS = 0xF1;
-    private static final int MSG_GPS_SENSORS = 0xF2;
-    private static final int MSG_EVENTS = 0xF3;
+    public static final int MSG_GPS = 0xF1;
+    public static final int MSG_GPS_SENSORS = 0xF2;
+    public static final int MSG_EVENTS = 0xF3;
 
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
-        
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
+
         HttpRequest request = (HttpRequest) msg;
         String uri = request.getUri();
-        
+
         if (uri.startsWith("/config")) {
 
             sendResponse(channel, "CONFIG: OK");
-        
+
         } else if (uri.startsWith("/addlog")) {
 
             sendResponse(channel, "ADDLOG: OK");
-        
+
         } else if (uri.startsWith("/inform")) {
 
             sendResponse(channel, "INFORM: OK");
-        
+
         } else if (uri.startsWith("/bingps")) {
 
             sendResponse(channel, "BINGPS: OK");
-            
-            // Identification
-            long deviceId;
+
             QueryStringDecoder decoder = new QueryStringDecoder(request.getUri());
-            String imei = decoder.getParameters().get("imei").get(0);
-            try {
-                deviceId = getDataManager().getDeviceByImei(imei).getId();
-            } catch(Exception error) {
-                Log.warning("Unknown device - " + imei);
+            if (!identify(decoder.getParameters().get("imei").get(0), channel, remoteAddress)) {
                 return null;
             }
 
-            List<Position> positions = new LinkedList<Position>();
+            List<Position> positions = new LinkedList<>();
             ChannelBuffer buf = request.getContent();
-            
+
             while (buf.readableBytes() > 2) {
 
                 buf.readUnsignedByte(); // header
                 int type = buf.readUnsignedByte();
                 buf.readUnsignedByte(); // length
-                
+
                 if (type == MSG_GPS || type == MSG_GPS_SENSORS) {
-                    
+
                     Position position = new Position();
-                    ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("piligrim");
-                    position.setDeviceId(deviceId);
-                    
-                    // Time
-                    Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-                    time.clear();
-                    time.set(Calendar.DAY_OF_MONTH, buf.readUnsignedByte());
-                    time.set(Calendar.MONTH, (buf.getByte(buf.readerIndex()) & 0x0f) - 1);
-                    time.set(Calendar.YEAR, 2010 + (buf.readUnsignedByte() >> 4));
-                    time.set(Calendar.HOUR, buf.readUnsignedByte());
-                    time.set(Calendar.MINUTE, buf.readUnsignedByte());
-                    time.set(Calendar.SECOND, buf.readUnsignedByte());
-                    position.setTime(time.getTime());
-                    
-                    // Latitude
+                    position.setProtocol(getProtocolName());
+                    position.setDeviceId(getDeviceId());
+
+                    DateBuilder dateBuilder = new DateBuilder()
+                            .setDay(buf.readUnsignedByte())
+                            .setMonth(buf.getByte(buf.readerIndex()) & 0x0f)
+                            .setYear(2010 + (buf.readUnsignedByte() >> 4))
+                            .setTime(buf.readUnsignedByte(), buf.readUnsignedByte(), buf.readUnsignedByte());
+                    position.setTime(dateBuilder.getDate());
+
                     double latitude = buf.readUnsignedByte();
                     latitude += buf.readUnsignedByte() / 60.0;
                     latitude += buf.readUnsignedByte() / 6000.0;
                     latitude += buf.readUnsignedByte() / 600000.0;
-                    
-                    // Longitude
+
                     double longitude = buf.readUnsignedByte();
                     longitude += buf.readUnsignedByte() / 60.0;
                     longitude += buf.readUnsignedByte() / 6000.0;
                     longitude += buf.readUnsignedByte() / 600000.0;
-                    
-                    // Hemisphere
+
                     int flags = buf.readUnsignedByte();
-                    if ((flags & 0x01) != 0) latitude = -latitude;
-                    if ((flags & 0x02) != 0) longitude = -longitude;
+                    if (BitUtil.check(flags, 0)) {
+                        latitude = -latitude;
+                    }
+                    if (BitUtil.check(flags, 1)) {
+                        longitude = -longitude;
+                    }
                     position.setLatitude(latitude);
                     position.setLongitude(longitude);
-                    position.setAltitude(0.0);
-                    
-                    // Satellites
+
                     int satellites = buf.readUnsignedByte();
-                    extendedInfo.set("satellites", satellites);
+                    position.set(Position.KEY_SATELLITES, satellites);
                     position.setValid(satellites >= 3);
-                    
-                    // Speed
-                    position.setSpeed((double) buf.readUnsignedByte());
-                    
-                    // Course
+
+                    position.setSpeed(buf.readUnsignedByte());
+
                     double course = buf.readUnsignedByte() << 1;
                     course += (flags >> 2) & 1;
                     course += buf.readUnsignedByte() / 100.0;
                     position.setCourse(course);
 
-                    // Sensors
                     if (type == MSG_GPS_SENSORS) {
-
-                        // External power
                         double power = buf.readUnsignedByte();
                         power += buf.readUnsignedByte() << 8;
-                        extendedInfo.set("power", power / 100);
+                        position.set(Position.KEY_POWER, power * 0.01);
 
-                        // Battery
                         double battery = buf.readUnsignedByte();
                         battery += buf.readUnsignedByte() << 8;
-                        extendedInfo.set("battery", battery / 100);
-                        
+                        position.set(Position.KEY_BATTERY, battery * 0.01);
+
                         buf.skipBytes(6);
-                        
                     }
-                    
-                    position.setExtendedInfo(extendedInfo.toString());
+
                     positions.add(position);
-                    
+
                 } else if (type == MSG_EVENTS) {
-                    
+
                     buf.skipBytes(13);
-                    
                 }
-                
             }
-            
+
             return positions;
         }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2012 - 2014 Anton Tananaev (anton.tananaev@gmail.com)
+ * Copyright 2012 - 2015 Anton Tananaev (anton.tananaev@gmail.com)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,236 +15,286 @@
  */
 package org.traccar.protocol;
 
-import java.nio.charset.Charset;
-import java.text.ParseException;
-import java.util.Calendar;
-import java.util.TimeZone;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.buffer.HeapChannelBufferFactory;
+import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
-import org.traccar.helper.Crc;
-import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
+import org.traccar.Context;
+import org.traccar.helper.Checksum;
+import org.traccar.helper.DateBuilder;
+import org.traccar.helper.Parser;
+import org.traccar.helper.PatternBuilder;
 import org.traccar.model.Position;
+
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.regex.Pattern;
 
 public class MeiligaoProtocolDecoder extends BaseProtocolDecoder {
 
-    public MeiligaoProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
+    public MeiligaoProtocolDecoder(MeiligaoProtocol protocol) {
+        super(protocol);
     }
 
-    private static final Pattern pattern = Pattern.compile(
-            "(\\d{2})(\\d{2})(\\d{2})\\.?(\\d+)?," + // Time (HHMMSS.SSS)
-            "([AV])," +                         // Validity
-            "(\\d+)(\\d{2}\\.\\d+)," +          // Latitude (DDMM.MMMM)
-            "([NS])," +
-            "(\\d+)(\\d{2}\\.\\d+)," +          // Longitude (DDDMM.MMMM)
-            "([EW])," +
-            "(\\d+\\.?\\d*)?," +                // Speed
-            "(\\d+\\.?\\d*)?," +                // Course
-            "(\\d{2})(\\d{2})(\\d{2})" +        // Date (DDMMYY)
-            "(?:[^\\|]*\\|(\\d+\\.\\d+)\\|" +   // Dilution of precision
-            "(\\d+\\.?\\d*)\\|)?" +             // Altitude
-            "([0-9a-fA-F]+)?" +                 // State
-            "(?:\\|([0-9a-fA-F]+),([0-9a-fA-F]+))?" + // ADC
-            "(?:,([0-9a-fA-F]+),([0-9a-fA-F]+)" +
-            ",([0-9a-fA-F]+),([0-9a-fA-F]+)" +
-            ",([0-9a-fA-F]+),([0-9a-fA-F]+))?" +
-            "(?:\\|([0-9a-fA-F]+))?" +          // Cell
-            "(?:\\|([0-9a-fA-F]+))?" +          // Signal
-            "(?:\\|([0-9a-fA-F]+))?" +          // Milage
-            ".*"); // TODO: parse ADC
+    private static final Pattern PATTERN = new PatternBuilder()
+            .number("(dd)(dd)(dd).?(d+)?,")      // time
+            .expression("([AV]),")               // validity
+            .number("(d+)(dd.d+),")              // latitude
+            .expression("([NS]),")
+            .number("(d+)(dd.d+),")              // longitude
+            .expression("([EW]),")
+            .number("(d+.?d*)?,")                // speed
+            .number("(d+.?d*)?,")                // course
+            .number("(dd)(dd)(dd)")              // date (ddmmyy)
+            .expression("[^\\|]*")
+            .groupBegin()
+            .number("|(d+.d+)?")                 // hdop
+            .number("|(-?d+.?d*)?")              // altitude
+            .number("|(xxxx)?")                  // state
+            .groupBegin()
+            .number("|(xxxx),(xxxx)")            // adc
+            .number("(?:,(xxxx),(xxxx),(xxxx),(xxxx),(xxxx),(xxxx))?")
+            .groupBegin()
+            .number("|x{16}")                    // cell
+            .number("|(xx)")                     // gsm
+            .number("|(x{8})")                   // odometer
+            .or()
+            .number("|(x{9})")                   // odometer
+            .groupBegin()
+            .number("|(x{5,})")                  // rfid
+            .groupEnd("?")
+            .groupEnd("?")
+            .groupEnd("?")
+            .groupEnd("?")
+            .any()
+            .compile();
 
-    private String getImei(ChannelBuffer buf) {
-        String id = "";
+    private static final Pattern PATTERN_RFID = new PatternBuilder()
+            .number("|(dd)(dd)(dd),")            // time
+            .number("(dd)(dd)(dd),")             // Date (ddmmyy)
+            .number("(d+)(dd.d+),")              // latitude
+            .expression("([NS]),")
+            .number("(d+)(dd.d+),")              // longitude
+            .expression("([EW])")
+            .compile();
 
-        for (int i = 4; i < 4 + 7; i++) {
-            int b = buf.getUnsignedByte(i);
+    public static final int MSG_HEARTBEAT = 0x0001;
+    public static final int MSG_SERVER = 0x0002;
+    public static final int MSG_LOGIN = 0x5000;
+    public static final int MSG_LOGIN_RESPONSE = 0x4000;
+
+    public static final int MSG_POSITION = 0x9955;
+    public static final int MSG_POSITION_LOGGED = 0x9016;
+    public static final int MSG_ALARM = 0x9999;
+
+    public static final int MSG_RFID = 0x9966;
+
+    private boolean identify(ChannelBuffer buf, Channel channel, SocketAddress remoteAddress) {
+        StringBuilder builder = new StringBuilder();
+
+        for (int i = 0; i < 7; i++) {
+            int b = buf.readUnsignedByte();
 
             // First digit
             int d1 = (b & 0xf0) >> 4;
-            if (d1 == 0xf) break;
-            id += d1;
+            if (d1 == 0xf) {
+                break;
+            }
+            builder.append(d1);
 
             // Second digit
-            int d2 = (b & 0x0f);
-            if (d2 == 0xf) break;
-            id += d2;
+            int d2 = b & 0x0f;
+            if (d2 == 0xf) {
+                break;
+            }
+            builder.append(d2);
         }
 
-        if (id.length() == 14) {
-            id += Crc.luhnChecksum(id); // IMEI checksum
+        String id = builder.toString();
+
+        // Try to recreate full IMEI number
+        // Sometimes first digit is cut, so this won't work
+        if (id.length() == 14 && identify(id + Checksum.luhn(Long.parseLong(id)), channel, remoteAddress, false)) {
+            return true;
         }
-        return id;
+
+        return identify(id, channel, remoteAddress);
+    }
+
+    private static void sendResponse(
+            Channel channel, SocketAddress remoteAddress, ChannelBuffer id, int type, ChannelBuffer msg) {
+
+        if (channel != null) {
+            ChannelBuffer buf = ChannelBuffers.buffer(
+                    2 + 2 + id.readableBytes() + 2 + msg.readableBytes() + 2 + 2);
+
+            buf.writeByte('@');
+            buf.writeByte('@');
+            buf.writeShort(buf.capacity());
+            buf.writeBytes(id);
+            buf.writeShort(type);
+            buf.writeBytes(msg);
+            buf.writeShort(Checksum.crc16(Checksum.CRC16_CCITT_FALSE, buf.toByteBuffer()));
+            buf.writeByte('\r');
+            buf.writeByte('\n');
+
+            channel.write(buf, remoteAddress);
+        }
+    }
+
+    private String getMeiligaoServer(Channel channel) {
+        String server = Context.getConfig().getString(getProtocolName() + ".server");
+        if (server == null) {
+            InetSocketAddress address = (InetSocketAddress) channel.getLocalAddress();
+            server = address.getAddress().getHostAddress() + ":" + address.getPort();
+        }
+        return server;
     }
 
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
-        
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
+
         ChannelBuffer buf = (ChannelBuffer) msg;
-        int command = buf.getUnsignedShort(4 + 7);
+        buf.skipBytes(2); // header
+        buf.readShort(); // length
+        ChannelBuffer id = buf.readBytes(7);
+        int command = buf.readUnsignedShort();
+        ChannelBuffer response;
 
-        // Login confirmation
-        if (command == 0x5000) {
-            ChannelBuffer sendBuf = HeapChannelBufferFactory.getInstance().getBuffer(18);
-            sendBuf.writeByte('@');
-            sendBuf.writeByte('@');
-            sendBuf.writeShort(sendBuf.capacity());
-            byte[] array = new byte[7];
-            buf.getBytes(0, array);
-            sendBuf.writeBytes(array);
-            sendBuf.writeShort(0x4000);
-            sendBuf.writeByte(0x01);
-            sendBuf.writeShort(Crc.crc16X25Ccitt(sendBuf.toByteBuffer()));
-            sendBuf.writeByte('\r');
-            sendBuf.writeByte('\n');
-            if (channel != null) {
-                channel.write(sendBuf);
-            }
-            return null;
+        switch (command) {
+            case MSG_LOGIN:
+                if (channel != null) {
+                    response = ChannelBuffers.wrappedBuffer(new byte[] {0x01});
+                    sendResponse(channel, remoteAddress, id, MSG_LOGIN_RESPONSE, response);
+                }
+                return null;
+            case MSG_HEARTBEAT:
+                if (channel != null) {
+                    response = ChannelBuffers.wrappedBuffer(new byte[] {0x01});
+                    sendResponse(channel, remoteAddress, id, MSG_HEARTBEAT, response);
+                }
+                return null;
+            case MSG_SERVER:
+                if (channel != null) {
+                    response = ChannelBuffers.copiedBuffer(
+                            getMeiligaoServer(channel), StandardCharsets.US_ASCII);
+                    sendResponse(channel, remoteAddress, id, MSG_SERVER, response);
+                }
+                return null;
+            case MSG_POSITION:
+            case MSG_POSITION_LOGGED:
+            case MSG_ALARM:
+            case MSG_RFID:
+                break;
+            default:
+                return null;
         }
 
-        // Payload offset
-        int offset = 4 + 7 + 2;
-
-        // Create new position
         Position position = new Position();
-        ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("meiligao");
+        position.setProtocol(getProtocolName());
 
-        // Alarm
-        if (command == 0x9999) {
-            extendedInfo.set("alarm", buf.getUnsignedByte(offset));
+        // Custom data
+        if (command == MSG_ALARM) {
+            position.set(Position.KEY_ALARM, buf.readUnsignedByte());
+        } else if (command == MSG_POSITION_LOGGED) {
+            buf.skipBytes(6);
         }
 
-        // Data offset
-        if (command == 0x9955) {
-            offset += 0;
-        } else if (command == 0x9016) {
-            offset += 6;
-        } else if (command == 0x9999) {
-            offset += 1;
-        } else {
+        if (!identify(id, channel, remoteAddress)) {
             return null;
         }
+        position.setDeviceId(getDeviceId());
 
-        // Get device by id
-        String imei = getImei(buf);
-        try {
-            position.setDeviceId(getDataManager().getDeviceByImei(imei).getId());
-        } catch(Exception error) {
-            Log.warning("Unknown device - " + imei);
-            return null;
-        }
-
-        // Parse message
-        String sentence = buf.toString(offset, buf.readableBytes() - offset - 4, Charset.defaultCharset());
-        Matcher parser = pattern.matcher(sentence);
-        if (!parser.matches()) {
-            throw new ParseException(null, 0);
-        }
-
-        Integer index = 1;
-
-        // Time
-        Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-        time.clear();
-        time.set(Calendar.HOUR, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.MINUTE, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.SECOND, Integer.valueOf(parser.group(index++)));
-        String mseconds = parser.group(index++);
-        if (mseconds != null) {
-            time.set(Calendar.MILLISECOND, Integer.valueOf(mseconds));
-        }
-
-        // Validity
-        position.setValid(parser.group(index++).compareTo("A") == 0);
-
-        // Latitude
-        Double latitude = Double.valueOf(parser.group(index++));
-        latitude += Double.valueOf(parser.group(index++)) / 60;
-        if (parser.group(index++).compareTo("S") == 0) latitude = -latitude;
-        position.setLatitude(latitude);
-
-        // Longitude
-        Double longitude = Double.valueOf(parser.group(index++));
-        longitude += Double.valueOf(parser.group(index++)) / 60;
-        if (parser.group(index++).compareTo("W") == 0) longitude = -longitude;
-        position.setLongitude(longitude);
-
-        // Speed
-        String speed = parser.group(index++);
-        if (speed != null) {
-            position.setSpeed(Double.valueOf(speed));
-        } else {
-            position.setSpeed(0.0);
-        }
-
-        // Course
-        String course = parser.group(index++);
-        if (course != null) {
-            position.setCourse(Double.valueOf(course));
-        } else {
-            position.setCourse(0.0);
-        }
-
-        // Date
-        time.set(Calendar.DAY_OF_MONTH, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.MONTH, Integer.valueOf(parser.group(index++)) - 1);
-        time.set(Calendar.YEAR, 2000 + Integer.valueOf(parser.group(index++)));
-        position.setTime(time.getTime());
-
-        // Dilution of precision
-        extendedInfo.set("hdop", parser.group(index++));
-
-        // Altitude
-        String altitude = parser.group(index++);
-        if (altitude != null) {
-            position.setAltitude(Double.valueOf(altitude));
-        } else {
-            position.setAltitude(0.0);
-        }
-
-        // State
-        String state = parser.group(index++);
-        if (state != null) {
-            extendedInfo.set("state", state);
-        }
-
-        // ADC
-        for (int i = 1; i <= 8; i++) {
-            String adc = parser.group(index++);
-            if (adc != null) {
-                extendedInfo.set("adc" + i, Integer.parseInt(adc, 16));
+        if (command == MSG_RFID) {
+            for (int i = 0; i < 15; i++) {
+                long rfid = buf.readUnsignedInt();
+                if (rfid != 0) {
+                    String card = String.format("%010d", rfid);
+                    position.set("card" + (i + 1), card);
+                    position.set(Position.KEY_RFID, card);
+                }
             }
         }
 
-        // Cell identifier
-        String cell = parser.group(index++);
-        if (cell != null) {
-            extendedInfo.set("cell", cell);
+        Pattern pattern;
+        if (command == MSG_RFID) {
+            pattern = PATTERN_RFID;
+        } else {
+            pattern = PATTERN;
         }
 
-        // GSM signal
-        String gsm = parser.group(index++);
-        if (gsm != null) {
-            extendedInfo.set("gsm", Integer.parseInt(gsm, 16));
+        Parser parser = new Parser(
+                pattern, buf.toString(buf.readerIndex(), buf.readableBytes() - 4, StandardCharsets.US_ASCII));
+        if (!parser.matches()) {
+            return null;
         }
 
-        // Milage
-        String milage = parser.group(index++);
-        if (milage != null) {
-            extendedInfo.set("milage", Integer.parseInt(milage, 16));
-        }
+        if (command == MSG_RFID) {
 
-        // Extended info
-        position.setExtendedInfo(extendedInfo.toString());
+            DateBuilder dateBuilder = new DateBuilder()
+                    .setTime(parser.nextInt(), parser.nextInt(), parser.nextInt())
+                    .setDateReverse(parser.nextInt(), parser.nextInt(), parser.nextInt());
+            position.setTime(dateBuilder.getDate());
+
+            position.setValid(true);
+            position.setLatitude(parser.nextCoordinate());
+            position.setLongitude(parser.nextCoordinate());
+
+        } else {
+
+            DateBuilder dateBuilder = new DateBuilder()
+                    .setTime(parser.nextInt(), parser.nextInt(), parser.nextInt());
+            if (parser.hasNext()) {
+                dateBuilder.setMillis(parser.nextInt());
+            }
+
+            position.setValid(parser.next().equals("A"));
+            position.setLatitude(parser.nextCoordinate());
+            position.setLongitude(parser.nextCoordinate());
+
+            if (parser.hasNext()) {
+                position.setSpeed(parser.nextDouble());
+            }
+
+            if (parser.hasNext()) {
+                position.setCourse(parser.nextDouble());
+            }
+
+            dateBuilder.setDateReverse(parser.nextInt(), parser.nextInt(), parser.nextInt());
+            position.setTime(dateBuilder.getDate());
+
+            position.set(Position.KEY_HDOP, parser.next());
+
+            if (parser.hasNext()) {
+                position.setAltitude(parser.nextDouble());
+            }
+
+            position.set(Position.KEY_STATUS, parser.next());
+
+            for (int i = 1; i <= 8; i++) {
+                if (parser.hasNext()) {
+                    position.set(Position.PREFIX_ADC + i, parser.nextInt(16));
+                }
+            }
+
+            if (parser.hasNext()) {
+                position.set(Position.KEY_GSM, parser.nextInt(16));
+            }
+
+            if (parser.hasNext()) {
+                position.set(Position.KEY_ODOMETER, parser.nextInt(16));
+            }
+            if (parser.hasNext()) {
+                position.set(Position.KEY_ODOMETER, parser.nextInt(16));
+            }
+
+            if (parser.hasNext()) {
+                position.set(Position.KEY_RFID, parser.nextInt(16));
+            }
+
+        }
 
         return position;
     }

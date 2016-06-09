@@ -1,2 +1,35 @@
-echo 242442323335363839353033373537383531387c4141244750524d432c3230333832332e3030302c412c333734302e333238352c4e2c30323132392e393239352c452c302e30302c2c3131313131332c2c2c412a37397c30312e357c30312e307c30312e317c3030303030303030303030307c32303133313131313230333832337c31343034313235317c30303030303030307c30303245304444377c303030307c302e303030307c363337317c333832340d0a | perl -ne 's/([0-9a-f]{2})/print chr hex $1/gie' | nc -v -w 10 localhost 5007
+#!/bin/bash
 
+#
+# Script to send convert HEX string into binary and send it to specified local port
+#
+# Example usage:
+#
+#   hex.sh 5039 3e52505631393535352b343533383431382d303733393531383530303032303231323b49443d393939393b2a37423c0d0a
+#
+
+if [ $# -lt 2 ]
+then
+  echo "USAGE: $0 <port> <hex>"
+  exit 1
+fi
+
+send_hex_udp () {
+  echo $2 | xxd -r -p | nc -u -w 0 localhost $1
+}
+
+send_hex_tcp () {
+  echo $2 | xxd -r -p | nc localhost $1
+}
+
+send_text_udp () {
+  echo -n -e $2 | nc -u -w 0 localhost $1
+}
+
+send_text_tcp () {
+  echo -n -e $2 | nc localhost $1
+}
+
+send_hex_tcp $1 $2
+
+exit $?

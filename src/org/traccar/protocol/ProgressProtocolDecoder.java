@@ -1,5 +1,5 @@
 /*
- * Copyright 2012 - 2013 Anton Tananaev (anton.tananaev@gmail.com)
+ * Copyright 2012 - 2014 Anton Tananaev (anton.tananaev@gmail.com)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,78 +15,39 @@
  */
 package org.traccar.protocol;
 
-import java.nio.ByteOrder;
-import java.nio.charset.Charset;
-import java.sql.ResultSet;
-import java.util.Calendar;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Properties;
-import java.util.TimeZone;
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
-import org.traccar.helper.AdvancedConnection;
-import org.traccar.helper.Log;
-import org.traccar.helper.NamedParameterStatement;
-import org.traccar.model.ExtendedInfoFormatter;
+import org.traccar.helper.BitUtil;
 import org.traccar.model.Position;
 
-/**
- * Progress tracker protocol decoder
- */
+import java.net.SocketAddress;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.util.Date;
+import java.util.LinkedList;
+import java.util.List;
+
 public class ProgressProtocolDecoder extends BaseProtocolDecoder {
 
-    private long deviceId;
     private long lastIndex;
     private long newIndex;
 
-    public ProgressProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
+    public ProgressProtocolDecoder(ProgressProtocol protocol) {
+        super(protocol);
     }
 
-    /*
-     * Message types
-     */
-    private static final int MSG_NULL = 0;
-    private static final int MSG_IDENT = 1;
-    private static final int MSG_IDENT_FULL = 2;
-    private static final int MSG_POINT = 10;
-    private static final int MSG_LOG_SYNC = 100;
-    private static final int MSG_LOGMSG = 101;
-    private static final int MSG_TEXT = 102;
-    private static final int MSG_ALARM = 200;
-    private static final int MSG_ALARM_RECIEVED = 201;
+    public static final int MSG_NULL = 0;
+    public static final int MSG_IDENT = 1;
+    public static final int MSG_IDENT_FULL = 2;
+    public static final int MSG_POINT = 10;
+    public static final int MSG_LOG_SYNC = 100;
+    public static final int MSG_LOGMSG = 101;
+    public static final int MSG_TEXT = 102;
+    public static final int MSG_ALARM = 200;
+    public static final int MSG_ALARM_RECIEVED = 201;
 
-    private static final String HEX_CHARS = "0123456789ABCDEF";
-
-    /**
-     * Hack to load last index from database
-     */
-    private void loadLastIndex() {
-        try {
-            Properties p = getServerManager().getProperties();
-            if (p.contains("database.selectLastIndex")) {
-                AdvancedConnection connection = new AdvancedConnection(
-                        p.getProperty("database.url"), p.getProperty("database.user"), p.getProperty("database.password"));
-                NamedParameterStatement queryLastIndex = new NamedParameterStatement(connection, p.getProperty("database.selectLastIndex"));
-                queryLastIndex.prepare();
-                queryLastIndex.setLong("device_id", deviceId);
-                ResultSet result = queryLastIndex.executeQuery();
-                if (result.next()) {
-                    lastIndex = result.getLong(1);
-                }
-            }
-        } catch(Exception error) {
-        }
-    }
-
-    /**
-     * Request archive messages
-     */
     private void requestArchive(Channel channel) {
         if (lastIndex == 0) {
             lastIndex = newIndex;
@@ -100,38 +61,28 @@ public class ProgressProtocolDecoder extends BaseProtocolDecoder {
         }
     }
 
-    /**
-     * Decode message
-     */
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
 
         ChannelBuffer buf = (ChannelBuffer) msg;
         int type = buf.readUnsignedShort();
         buf.readUnsignedShort(); // length
 
-        // Authentication
         if (type == MSG_IDENT || type == MSG_IDENT_FULL) {
-            long id = buf.readUnsignedInt();
+
+            buf.readUnsignedInt(); // id
             int length = buf.readUnsignedShort();
             buf.skipBytes(length);
             length = buf.readUnsignedShort();
             buf.skipBytes(length);
             length = buf.readUnsignedShort();
-            String imei = buf.readBytes(length).toString(Charset.defaultCharset());
-            try {
-                deviceId = getDataManager().getDeviceByImei(imei).getId();
-                loadLastIndex();
-            } catch(Exception error) {
-                Log.warning("Unknown device - " + imei + " (id - " + id + ")");
-            }
-        }
+            String imei = buf.readBytes(length).toString(StandardCharsets.US_ASCII);
+            identify(imei, channel, remoteAddress);
 
-        // Position
-        else if (deviceId != 0 && (type == MSG_POINT || type == MSG_ALARM || type == MSG_LOGMSG)) {
-            List<Position> positions = new LinkedList<Position>();
+        } else if (hasDeviceId() && (type == MSG_POINT || type == MSG_ALARM || type == MSG_LOGMSG)) {
+
+            List<Position> positions = new LinkedList<>();
 
             int recordCount = 1;
             if (type == MSG_LOGMSG) {
@@ -140,108 +91,66 @@ public class ProgressProtocolDecoder extends BaseProtocolDecoder {
 
             for (int j = 0; j < recordCount; j++) {
                 Position position = new Position();
-                ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("progress");
-                position.setDeviceId(deviceId);
+                position.setProtocol(getProtocolName());
+                position.setDeviceId(getDeviceId());
 
-                // Message index
                 if (type == MSG_LOGMSG) {
-                    extendedInfo.set("archive", true);
+                    position.set(Position.KEY_ARCHIVE, true);
                     int subtype = buf.readUnsignedShort();
                     if (subtype == MSG_ALARM) {
-                        extendedInfo.set("alarm", true);
+                        position.set(Position.KEY_ALARM, true);
                     }
                     if (buf.readUnsignedShort() > buf.readableBytes()) {
                         lastIndex += 1;
                         break; // workaround for device bug
                     }
                     lastIndex = buf.readUnsignedInt();
-                    extendedInfo.set("index", lastIndex);
+                    position.set(Position.KEY_INDEX, lastIndex);
                 } else {
                     newIndex = buf.readUnsignedInt();
                 }
 
-                // Time
-                Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-                time.clear();
-                time.setTimeInMillis(buf.readUnsignedInt() * 1000);
-                position.setTime(time.getTime());
+                position.setTime(new Date(buf.readUnsignedInt() * 1000));
+                position.setLatitude(buf.readInt() * 180.0 / 0x7FFFFFFF);
+                position.setLongitude(buf.readInt() * 180.0 / 0x7FFFFFFF);
+                position.setSpeed(buf.readUnsignedInt() * 0.01);
+                position.setCourse(buf.readUnsignedShort() * 0.01);
+                position.setAltitude(buf.readUnsignedShort() * 0.01);
 
-                // Latitude
-                position.setLatitude(((double) buf.readInt()) / 0x7FFFFFFF * 180.0);
+                int satellites = buf.readUnsignedByte();
+                position.setValid(satellites >= 3);
+                position.set(Position.KEY_SATELLITES, satellites);
 
-                // Longitude
-                position.setLongitude(((double) buf.readInt()) / 0x7FFFFFFF * 180.0);
-
-                // Speed
-                position.setSpeed(((double) buf.readUnsignedInt()) / 100);
-
-                // Course
-                position.setCourse(((double) buf.readUnsignedShort()) / 100);
-
-                // Altitude
-                position.setAltitude(((double) buf.readUnsignedShort()) / 100);
-
-                // Satellites
-                int satellitesNumber = buf.readUnsignedByte();
-                extendedInfo.set("satellites", satellitesNumber);
-
-                // Validity
-                position.setValid(satellitesNumber >= 3); // TODO: probably wrong
-
-                // Cell signal
-                extendedInfo.set("gsm", buf.readUnsignedByte());
-
-                // Milage
-                extendedInfo.set("milage", buf.readUnsignedInt());
+                position.set(Position.KEY_GSM, buf.readUnsignedByte());
+                position.set(Position.KEY_ODOMETER, buf.readUnsignedInt());
 
                 long extraFlags = buf.readLong();
 
-                // Analog inputs
-                if ((extraFlags & 0x1) == 0x1) {
+                if (BitUtil.check(extraFlags, 0)) {
                     int count = buf.readUnsignedShort();
                     for (int i = 1; i <= count; i++) {
-                        extendedInfo.set("adc" + i, buf.readUnsignedShort());
+                        position.set(Position.PREFIX_ADC + i, buf.readUnsignedShort());
                     }
-
                 }
 
-                // CAN adapter
-                if ((extraFlags & 0x2) == 0x2) {
+                if (BitUtil.check(extraFlags, 1)) {
                     int size = buf.readUnsignedShort();
-                    extendedInfo.set("can", buf.toString(buf.readerIndex(), size, Charset.defaultCharset()));
+                    position.set("can", buf.toString(buf.readerIndex(), size, StandardCharsets.US_ASCII));
                     buf.skipBytes(size);
                 }
 
-                // Passenger sensor
-                if ((extraFlags & 0x4) == 0x4) {
-                    int size = buf.readUnsignedShort();
-
-                    // Convert binary data to hex
-                    StringBuilder hex = new StringBuilder();
-                    for (int i = buf.readerIndex(); i < buf.readerIndex() + size; i++) {
-                        byte b = buf.getByte(i);
-                        hex.append(HEX_CHARS.charAt((b & 0xf0) >> 4));
-                        hex.append(HEX_CHARS.charAt((b & 0x0F)));
-                    }
-
-                    extendedInfo.set("passenger", hex);
-
-                    buf.skipBytes(size);
+                if (BitUtil.check(extraFlags, 2)) {
+                    position.set("passenger",
+                            ChannelBuffers.hexDump(buf.readBytes(buf.readUnsignedShort())));
                 }
 
-                // Send response for alarm message
                 if (type == MSG_ALARM) {
-                    byte[] response = {(byte)0xC9,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+                    position.set(Position.KEY_ALARM, true);
+                    byte[] response = {(byte) 0xC9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
                     channel.write(ChannelBuffers.wrappedBuffer(response));
-
-                    extendedInfo.set("alarm", true);
                 }
 
-                // Skip CRC
-                buf.readUnsignedInt();
-
-                // Extended info
-                position.setExtendedInfo(extendedInfo.toString());
+                buf.readUnsignedInt(); // crc
 
                 positions.add(position);
             }

@@ -19,45 +19,39 @@ import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.channel.Channel;
 import org.jboss.netty.channel.ChannelHandlerContext;
 import org.jboss.netty.handler.codec.frame.FrameDecoder;
-import org.traccar.helper.ChannelBufferTools;
+import org.traccar.helper.StringFinder;
 
 public class XexunFrameDecoder extends FrameDecoder {
 
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx,
-            Channel channel,
-            ChannelBuffer buf) throws Exception {
+            ChannelHandlerContext ctx, Channel channel, ChannelBuffer buf) throws Exception {
 
-        // Check minimum length
-        int length = buf.readableBytes();
-        if (length < 80) {
+        if (buf.readableBytes() < 80) {
             return null;
         }
 
-        // Find start
-        Integer beginIndex = ChannelBufferTools.find(buf, 0, length, "GPRMC");
-        if (beginIndex == null) {
+        int beginIndex = buf.indexOf(buf.readerIndex(), buf.writerIndex(), new StringFinder("GPRMC"));
+        if (beginIndex == -1) {
+            beginIndex = buf.indexOf(buf.readerIndex(), buf.writerIndex(), new StringFinder("GNRMC"));
+            if (beginIndex == -1) {
+                return null;
+            }
+        }
+
+        int identifierIndex = buf.indexOf(beginIndex, buf.writerIndex(), new StringFinder("imei:"));
+        if (identifierIndex == -1) {
             return null;
         }
 
-        // Find identifier
-        Integer idIndex = ChannelBufferTools.find(buf, beginIndex, length, "imei:");
-        if (idIndex == null) {
+        int endIndex = buf.indexOf(identifierIndex, buf.writerIndex(), (byte) ',');
+        if (endIndex == -1) {
             return null;
         }
 
-        // Find end
-        Integer endIndex = ChannelBufferTools.find(buf, idIndex, length, ",");
-        if (endIndex == null) {
-            return null;
-        }
-
-        // Read buffer
         buf.skipBytes(beginIndex);
-        ChannelBuffer frame = buf.readBytes(endIndex - beginIndex + 1);
 
-        return frame;
+        return buf.readBytes(endIndex - beginIndex + 1);
     }
 
 }

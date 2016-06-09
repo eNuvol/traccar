@@ -15,39 +15,45 @@
  */
 package org.traccar.protocol;
 
-import java.util.Calendar;
-import java.util.TimeZone;
+import org.jboss.netty.channel.Channel;
+import org.traccar.BaseProtocolDecoder;
+import org.traccar.helper.DateBuilder;
+import org.traccar.helper.Parser;
+import org.traccar.helper.PatternBuilder;
+import org.traccar.model.Position;
+
+import java.net.SocketAddress;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
-import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
-import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
-import org.traccar.model.Position;
 
 public class WialonProtocolDecoder extends BaseProtocolDecoder {
 
-    private Long deviceId;
-
-    public WialonProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
+    public WialonProtocolDecoder(WialonProtocol protocol) {
+        super(protocol);
     }
 
-    private static final Pattern pattern = Pattern.compile(
-            "#S?D#" +
-            "(\\d{2})(\\d{2})(\\d{2});" +  // Date (DDMMYY)
-            "(\\d{2})(\\d{2})(\\d{2});" +  // Time (HHMMSS)
-            "(\\d{2})(\\d{2}\\.\\d+);" +   // Latitude (DDMM.MMMM)
-            "([NS]);" +
-            "(\\d{3})(\\d{2}\\.\\d+);" +   // Longitude (DDDMM.MMMM)
-            "([EW]);" +
-            "(\\d+\\.?\\d*);" +            // Speed
-            "(\\d+\\.?\\d*);" +            // Course
-            "(\\d+\\.?\\d*);" +            // Altitude
-            "(\\d+)" +                     // Satellites
-            ".*");                         // Full format
+    private static final Pattern PATTERN = new PatternBuilder()
+            .number("(dd)(dd)(dd);")             // date (ddmmyy)
+            .number("(dd)(dd)(dd);")             // time
+            .number("(dd)(dd.d+);")              // latitude
+            .expression("([NS]);")
+            .number("(ddd)(dd.d+);")             // longitude
+            .expression("([EW]);")
+            .number("(d+.?d*)?;")                // speed
+            .number("(d+.?d*)?;")                // course
+            .number("(?:NA|(d+.?d*));")          // altitude
+            .number("(?:NA|(d+))")               // satellites
+            .groupBegin().text(";")
+            .number("(?:NA|(d+.?d*));")          // hdop
+            .number("(?:NA|(d+));")              // inputs
+            .number("(?:NA|(d+));")              // outputs
+            .expression("(?:NA|([^;]*));")       // adc
+            .expression("(?:NA|([^;]*));")       // ibutton
+            .expression("(?:NA|(.*))")           // params
+            .groupEnd("?")
+            .compile();
 
     private void sendResponse(Channel channel, String prefix, Integer number) {
         if (channel != null) {
@@ -60,89 +66,104 @@ public class WialonProtocolDecoder extends BaseProtocolDecoder {
         }
     }
 
+    private Position decodePosition(String substring) {
+
+        Parser parser = new Parser(PATTERN, substring);
+        if (!hasDeviceId() || !parser.matches()) {
+            return null;
+        }
+
+        Position position = new Position();
+        position.setProtocol(getProtocolName());
+        position.setDeviceId(getDeviceId());
+
+        DateBuilder dateBuilder = new DateBuilder()
+                .setDateReverse(parser.nextInt(), parser.nextInt(), parser.nextInt())
+                .setTime(parser.nextInt(), parser.nextInt(), parser.nextInt());
+        position.setTime(dateBuilder.getDate());
+
+        position.setLatitude(parser.nextCoordinate());
+        position.setLongitude(parser.nextCoordinate());
+        position.setSpeed(parser.nextDouble());
+        position.setCourse(parser.nextDouble());
+        position.setAltitude(parser.nextDouble());
+
+        if (parser.hasNext()) {
+            int satellites = parser.nextInt();
+            position.setValid(satellites >= 3);
+            position.set(Position.KEY_SATELLITES, satellites);
+        }
+
+        position.set(Position.KEY_HDOP, parser.next());
+        position.set(Position.KEY_INPUT, parser.next());
+        position.set(Position.KEY_OUTPUT, parser.next());
+
+        if (parser.hasNext()) {
+            String[] values = parser.next().split(",");
+            for (int i = 0; i < values.length; i++) {
+                position.set(Position.PREFIX_ADC + (i + 1), values[i]);
+            }
+        }
+
+        position.set(Position.KEY_RFID, parser.next());
+
+        if (parser.hasNext()) {
+            String[] values = parser.next().split(",");
+            for (String param : values) {
+                Matcher paramParser = Pattern.compile("(.*):[1-3]:(.*)").matcher(param);
+                if (paramParser.matches()) {
+                    position.set(paramParser.group(1).toLowerCase(), paramParser.group(2));
+                }
+            }
+        }
+
+        return position;
+    }
+
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
 
         String sentence = (String) msg;
 
-        // Detect device ID
         if (sentence.startsWith("#L#")) {
+
             String imei = sentence.substring(3, sentence.indexOf(';'));
-            try {
-                deviceId = getDataManager().getDeviceByImei(imei).getId();
+            if (identify(imei, channel, remoteAddress)) {
                 sendResponse(channel, "#AL#", 1);
-            } catch(Exception error) {
-                Log.warning("Unknown device - " + imei);
-            }
-        }
-
-        // Heartbeat
-        else if (sentence.startsWith("#P#")) {
-            sendResponse(channel, "#AP#", null);
-        }
-        
-        // Parse message
-        else if ((sentence.startsWith("#SD#") || sentence.startsWith("#D#")) && deviceId != null) {
-
-            // Parse message
-            Matcher parser = pattern.matcher(sentence);
-            if (!parser.matches()) {
-                return null;
             }
 
-            // Create new position
-            Position position = new Position();
-            ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("wialon");
-            position.setDeviceId(deviceId);
+        } else if (sentence.startsWith("#P#")) {
 
-            Integer index = 1;
+            sendResponse(channel, "#AP#", null); // heartbeat
 
-            // Date and Time
-            Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-            time.clear();
-            time.set(Calendar.DAY_OF_MONTH, Integer.valueOf(parser.group(index++)));
-            time.set(Calendar.MONTH, Integer.valueOf(parser.group(index++)) - 1);
-            time.set(Calendar.YEAR, 2000 + Integer.valueOf(parser.group(index++)));
-            time.set(Calendar.HOUR, Integer.valueOf(parser.group(index++)));
-            time.set(Calendar.MINUTE, Integer.valueOf(parser.group(index++)));
-            time.set(Calendar.SECOND, Integer.valueOf(parser.group(index++)));
-            position.setTime(time.getTime());
+        } else if (sentence.startsWith("#SD#") || sentence.startsWith("#D#")) {
 
-            // Latitude
-            Double latitude = Double.valueOf(parser.group(index++));
-            latitude += Double.valueOf(parser.group(index++)) / 60;
-            if (parser.group(index++).compareTo("S") == 0) latitude = -latitude;
-            position.setLatitude(latitude);
+            Position position = decodePosition(
+                    sentence.substring(sentence.indexOf('#', 1) + 1));
 
-            // Longitude
-            Double longitude = Double.valueOf(parser.group(index++));
-            longitude += Double.valueOf(parser.group(index++)) / 60;
-            if (parser.group(index++).compareTo("W") == 0) longitude = -longitude;
-            position.setLongitude(longitude);
+            if (position != null) {
+                sendResponse(channel, "#AD#", 1);
+                return position;
+            }
 
-            // Speed
-            position.setSpeed(Double.valueOf(parser.group(index++)));
+        } else if (sentence.startsWith("#B#")) {
 
-            // Course
-            position.setCourse(Double.valueOf(parser.group(index++)));
+            String[] messages = sentence.substring(sentence.indexOf('#', 1) + 1).split("\\|");
+            List<Position> positions = new LinkedList<>();
 
-            // Altitude
-            position.setAltitude(Double.valueOf(parser.group(index++)));
-            
-            // Satellites
-            int satellites = Integer.valueOf(parser.group(index++));
-            position.setValid(satellites >= 3);
-            extendedInfo.set("satellites", satellites);
-            
-            // Extended info
-            position.setExtendedInfo(extendedInfo.toString());
+            for (String message : messages) {
+                Position position = decodePosition(message);
+                if (position != null) {
+                    positions.add(position);
+                }
+            }
 
-            // Send response
-            sendResponse(channel, "#AD#", 1);
+            sendResponse(channel, "#AB#", messages.length);
+            if (!positions.isEmpty()) {
+                return positions;
+            }
 
-            return position;
         }
 
         return null;

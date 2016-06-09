@@ -1,20 +1,27 @@
 package org.traccar.protocol;
 
-import org.traccar.helper.TestDataManager;
-import org.jboss.netty.buffer.ChannelBuffers;
-import static org.traccar.helper.DecoderVerifier.verify;
 import org.junit.Test;
+import org.traccar.ProtocolTest;
 
-public class Gt02ProtocolDecoderTest {
+public class Gt02ProtocolDecoderTest extends ProtocolTest {
 
     @Test
     public void testDecode() throws Exception {
 
-        Gt02ProtocolDecoder decoder = new Gt02ProtocolDecoder(null);
-        decoder.setDataManager(new TestDataManager());
+        Gt02ProtocolDecoder decoder = new Gt02ProtocolDecoder(new Gt02Protocol());
 
-        byte[] buf1 = {0x68,0x68,0x25,0x00,0x00,0x01,0x23,0x45,0x67,(byte)0x89,0x01,0x23,0x45,0x00,0x01,0x10,0x01,0x01,0x01,0x01,0x01,0x01,0x02,0x6B,0x3F,0x3E,0x02,0x6B,0x3F,0x3E,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x0D,0x0A};
-        verify(decoder.decode(null, null, ChannelBuffers.wrappedBuffer(buf1)));
+        verifyAttributes(decoder, binary(
+                "68681a060303588990500037252de91a010a171a191b171915191e10000d0a"));
+
+        verifyPosition(decoder, binary(
+                "68682500000123456789012345000110010101010101026B3F3E026B3F3E000000000000000000010D0A"),
+                position("2001-01-01 01:01:01.000", true, -22.54610, -22.54610));
+
+        verifyAttributes(decoder, binary(
+                "6868110603035889905101276600001a0402292d0d0a"));
+
+        verifyPosition(decoder, binary(
+                "68682500a403588990510127660001100e09060a1d1b00ade1c90b79ea3000011b000000000000050d0a"));
 
     }
 

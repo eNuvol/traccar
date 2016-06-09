@@ -1,5 +1,5 @@
 /*
- * Copyright 2012 - 2014 Anton Tananaev (anton.tananaev@gmail.com)
+ * Copyright 2012 - 2016 Anton Tananaev (anton.tananaev@gmail.com)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,42 +15,59 @@
  */
 package org.traccar;
 
-import java.util.List;
-import org.jboss.netty.channel.Channel;
+import org.jboss.netty.channel.ChannelEvent;
 import org.jboss.netty.channel.ChannelHandlerContext;
+import org.jboss.netty.channel.ChannelUpstreamHandler;
+import org.jboss.netty.channel.Channels;
 import org.jboss.netty.channel.MessageEvent;
-import org.jboss.netty.handler.codec.oneone.OneToOneDecoder;
+import org.traccar.geocode.AddressFormat;
 import org.traccar.geocode.ReverseGeocoder;
 import org.traccar.model.Position;
 
-public class ReverseGeocoderHandler extends OneToOneDecoder {
+public class ReverseGeocoderHandler implements ChannelUpstreamHandler {
 
     private final ReverseGeocoder geocoder;
+    private final boolean processInvalidPositions;
+    private final AddressFormat addressFormat;
 
-    public ReverseGeocoderHandler(ReverseGeocoder geocoder) {
+    public ReverseGeocoderHandler(ReverseGeocoder geocoder, boolean processInvalidPositions) {
         this.geocoder = geocoder;
+        this.processInvalidPositions = processInvalidPositions;
+
+        String formatString = Context.getConfig().getString("geocoder.format");
+        if (formatString != null) {
+            addressFormat = new AddressFormat(formatString);
+        } else {
+            addressFormat = new AddressFormat();
+        }
     }
 
     @Override
-    protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
-        
-        if (geocoder != null) {
-            if (msg instanceof Position) {
-                Position position = (Position) msg;
-                position.setAddress(geocoder.getAddress(
-                        position.getLatitude(), position.getLongitude()));
-            } else if (msg instanceof List) {
-                List<Position> positions = (List<Position>) msg;
-                for (Position position : positions) {
-                    position.setAddress(geocoder.getAddress(
-                            position.getLatitude(), position.getLongitude()));
-                }
-            }
+    public void handleUpstream(final ChannelHandlerContext ctx, ChannelEvent evt) throws Exception {
+        if (!(evt instanceof MessageEvent)) {
+            ctx.sendUpstream(evt);
+            return;
         }
 
-        return msg;
+        final MessageEvent e = (MessageEvent) evt;
+        Object message = e.getMessage();
+        if (message instanceof Position) {
+            final Position position = (Position) message;
+            if (processInvalidPositions || position.getValid()) {
+                geocoder.getAddress(addressFormat, position.getLatitude(), position.getLongitude(),
+                        new ReverseGeocoder.ReverseGeocoderCallback() {
+                    @Override
+                    public void onResult(String address) {
+                        position.setAddress(address);
+                        Channels.fireMessageReceived(ctx, position, e.getRemoteAddress());
+                    }
+                });
+            } else {
+                Channels.fireMessageReceived(ctx, position, e.getRemoteAddress());
+            }
+        } else {
+            Channels.fireMessageReceived(ctx, message, e.getRemoteAddress());
+        }
     }
 
 }

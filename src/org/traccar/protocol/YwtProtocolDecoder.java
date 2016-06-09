@@ -15,46 +15,44 @@
  */
 package org.traccar.protocol;
 
-import java.util.Calendar;
-import java.util.TimeZone;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
-import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
+import org.traccar.helper.DateBuilder;
+import org.traccar.helper.Parser;
+import org.traccar.helper.PatternBuilder;
 import org.traccar.model.Position;
+
+import java.net.SocketAddress;
+import java.util.regex.Pattern;
 
 public class YwtProtocolDecoder extends BaseProtocolDecoder {
 
-    public YwtProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
+    public YwtProtocolDecoder(YwtProtocol protocol) {
+        super(protocol);
     }
 
-    private static final Pattern pattern = Pattern.compile(
-            "%(..)," +                     // Type
-            "(\\d+):" +                    // Unit identifier
-            "\\d+," +                      // Subtype
-            "(\\d{2})(\\d{2})(\\d{2})" +   // Date (YYMMDD)
-            "(\\d{2})(\\d{2})(\\d{2})," +  // Time (HHMMSS)
-            "([EW])" +
-            "(\\d{3}\\.\\d{6})," +         // Longitude (DDDMM.MMMM)
-            "([NS])" +
-            "(\\d{2}\\.\\d{6})," +         // Latitude (DDMM.MMMM)
-            "(\\d+)?," +                   // Altitude
-            "(\\d+)," +                    // Speed
-            "(\\d+)," +                    // Course
-            "(\\d+)," +                    // Satellite
-            "([^,]+)," +                   // Report identifier
-            "([0-9a-fA-F\\-]+)" +          // Status
-            ".*");
+    private static final Pattern PATTERN = new PatternBuilder()
+            .expression("%(..),")                // type
+            .number("(d+):")                     // unit identifier
+            .number("d+,")                       // subtype
+            .number("(dd)(dd)(dd)")              // date (yymmdd)
+            .number("(dd)(dd)(dd),")             // time
+            .expression("([EW])")
+            .number("(ddd.d{6}),")               // longitude
+            .expression("([NS])")
+            .number("(dd.d{6}),")                // latitude
+            .number("(d+)?,")                    // altitude
+            .number("(d+),")                     // speed
+            .number("(d+),")                     // course
+            .number("(d+),")                     // satellite
+            .expression("([^,]+),")              // report identifier
+            .expression("([-0-9a-fA-F]+)")       // status
+            .any()
+            .compile();
 
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
 
         String sentence = (String) msg;
 
@@ -68,88 +66,50 @@ public class YwtProtocolDecoder extends BaseProtocolDecoder {
             if (end == -1) {
                 end = sentence.length();
             }
-            
+
             channel.write("%AT+SN=" + sentence.substring(start, end));
             return null;
         }
-        
-        // Parse message
-        Matcher parser = pattern.matcher(sentence);
+
+        Parser parser = new Parser(PATTERN, sentence);
         if (!parser.matches()) {
             return null;
         }
-        
-        // Create new position
-        Position position = new Position();
-        ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("ywt");
-        Integer index = 1;
-        String type = parser.group(index++);
 
-        // Device
-        String id = parser.group(index++);
-        try {
-            position.setDeviceId(getDataManager().getDeviceByImei(id).getId());
-        } catch(Exception error) {
-            Log.warning("Unknown device - " + id);
+        Position position = new Position();
+        position.setProtocol(getProtocolName());
+
+        String type = parser.next();
+
+        if (!identify(parser.next(), channel, remoteAddress)) {
             return null;
         }
-        
-        // Time
-        Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-        time.clear();
-        time.set(Calendar.YEAR, 2000 + Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.MONTH, Integer.valueOf(parser.group(index++)) - 1);
-        time.set(Calendar.DAY_OF_MONTH, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.HOUR, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.MINUTE, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.SECOND, Integer.valueOf(parser.group(index++)));
-        position.setTime(time.getTime());
+        position.setDeviceId(getDeviceId());
 
-        // Longitude
-        String hemisphere = parser.group(index++);
-        Double longitude = Double.valueOf(parser.group(index++));
-        if (hemisphere.compareTo("W") == 0) longitude = -longitude;
-        position.setLongitude(longitude);
+        DateBuilder dateBuilder = new DateBuilder()
+                .setDate(parser.nextInt(), parser.nextInt(), parser.nextInt())
+                .setTime(parser.nextInt(), parser.nextInt(), parser.nextInt());
+        position.setTime(dateBuilder.getDate());
 
-        // Latitude
-        hemisphere = parser.group(index++);
-        Double latitude = Double.valueOf(parser.group(index++));
-        if (hemisphere.compareTo("S") == 0) latitude = -latitude;
-        position.setLatitude(latitude);
-        
-        // Altitude
-        String altitude = parser.group(index++);
-        if (altitude != null) {
-            position.setAltitude(Double.valueOf(altitude));
-        } else {
-            position.setAltitude(0.0);
-        }
+        position.setLongitude(parser.nextCoordinate(Parser.CoordinateFormat.HEM_DEG));
+        position.setLatitude(parser.nextCoordinate(Parser.CoordinateFormat.HEM_DEG));
+        position.setAltitude(parser.nextDouble());
+        position.setSpeed(parser.nextDouble());
+        position.setCourse(parser.nextDouble());
 
-        // Speed
-        position.setSpeed(Double.valueOf(parser.group(index++)));
-
-        // Course
-        position.setCourse(Double.valueOf(parser.group(index++)));
-        
-        // Satellites
-        int satellites = Integer.valueOf(parser.group(index++));
+        int satellites = parser.nextInt();
         position.setValid(satellites >= 3);
-        extendedInfo.set("satellites", satellites);
-        
-        // Report identifier
-        String reportId = parser.group(index++);
-        
-        // Status
-        extendedInfo.set("status", parser.group(index++));
+        position.set(Position.KEY_SATELLITES, satellites);
+
+        String reportId = parser.next();
+
+        position.set(Position.KEY_STATUS, parser.next());
 
         // Send response
-        if (type.equals("KP") || type.equals("EP") || type.equals("EP")) {
-            if (channel != null) {
-                channel.write("%AT+" + type + "=" + reportId + "\r\n");
-            }
+        if ((type.equals("KP") || type.equals("EP")) && channel != null) {
+            channel.write("%AT+" + type + "=" + reportId + "\r\n");
         }
-        
-        position.setExtendedInfo(extendedInfo.toString());
+
         return position;
     }
 

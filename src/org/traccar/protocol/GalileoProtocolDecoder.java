@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 Anton Tananaev (anton.tananaev@gmail.com)
+ * Copyright 2013 - 2015 Anton Tananaev (anton.tananaev@gmail.com)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,52 +15,28 @@
  */
 package org.traccar.protocol;
 
-import java.nio.ByteOrder;
-import java.nio.charset.Charset;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.Map;
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
 import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
 import org.traccar.model.Position;
+
+import java.net.SocketAddress;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public class GalileoProtocolDecoder extends BaseProtocolDecoder {
 
-    public GalileoProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
-    }
-    
-    private static final Map<Integer, Integer> tagLengthMap = new HashMap<Integer, Integer>();
-    
-    static {
-        int[] l1 = {0x01,0x02,0x35,0x43,0xa0,0xa1,0xa2,0xa3,0xa4,0xa5,0xa6,0xa7,0xa8,0xa9,0xaa,0xab,0xac,0xad,0xae,0xaf,0xc4,0xc5,0xc6,0xc7,0xc8,0xc9,0xca,0xcb,0xcc,0xcd,0xce,0xcf,0xd0,0xd1,0xd2,0xd5};
-        int[] l2 = {0x04,0x10,0x34,0x40,0x41,0x42,0x45,0x46,0x50,0x51,0x52,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x60,0x61,0x62,0x70,0x71,0x72,0x73,0x74,0x75,0x76,0x77,0xb0,0xb1,0xb2,0xb3,0xb4,0xb5,0xb6,0xb7,0xb8,0xb9,0xd6,0xd7,0xd8,0xd9,0xda};
-        int[] l4 = {0x20,0x33,0x44,0x90,0xc0,0xc1,0xc2,0xc3,0xd3,0xd4,0xdb,0xdc,0xdd,0xde,0xdf,0xf0,0xf1,0xf2,0xf3};
-        for (int i : l1) { tagLengthMap.put(i, 1); }
-        for (int i : l2) { tagLengthMap.put(i, 2); }
-        for (int i : l4) { tagLengthMap.put(i, 4); }
-    }
-
-    private static int getTagLength(int tag) {
-        return tagLengthMap.get(tag);
-    }
-
-    private String readImei(ChannelBuffer buf) {
-        int b = buf.readUnsignedByte();
-        StringBuilder imei = new StringBuilder();
-        imei.append(b & 0x0F);
-        for (int i = 0; i < 7; i++) {
-            b = buf.readUnsignedByte();
-            imei.append((b & 0xF0) >> 4);
-            imei.append(b & 0x0F);
-        }
-        return imei.toString();
+    public GalileoProtocolDecoder(GalileoProtocol protocol) {
+        super(protocol);
     }
 
     private static final int TAG_IMEI = 0x03;
@@ -71,9 +47,60 @@ public class GalileoProtocolDecoder extends BaseProtocolDecoder {
     private static final int TAG_STATUS = 0x40;
     private static final int TAG_POWER = 0x41;
     private static final int TAG_BATTERY = 0x42;
-    private static final int TAG_MILAGE = 0xd4;
+    private static final int TAG_ODOMETER = 0xd4;
+    private static final int TAG_REFRIGERATOR = 0x5b;
+    private static final int TAG_PRESSURE = 0x5c;
 
-    
+    private static final Map<Integer, Integer> TAG_LENGTH_MAP = new HashMap<>();
+
+    static {
+        int[] l1 = {
+            0x01, 0x02, 0x35, 0x43, 0xc4, 0xc5, 0xc6, 0xc7,
+            0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf,
+            0xd0, 0xd1, 0xd2, 0xd5, 0x88, 0x8a, 0x8b, 0x8c,
+            0xa0, 0xaf, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6,
+            0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae
+        };
+        int[] l2 = {
+            0x04, 0x10, 0x34, 0x40, 0x41, 0x42, 0x45, 0x46,
+            0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57,
+            0x58, 0x59, 0x60, 0x61, 0x62, 0x70, 0x71, 0x72,
+            0x73, 0x74, 0x75, 0x76, 0x77, 0xb0, 0xb1, 0xb2,
+            0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xd6,
+            0xd7, 0xd8, 0xd9, 0xda
+        };
+        int[] l3 = {
+            0x63, 0x64, 0x6f, 0x5d, 0x65, 0x66, 0x67, 0x68,
+            0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e
+        };
+        int[] l4 = {
+            0x20, 0x33, 0x44, 0x90, 0xc0, 0xc1, 0xc2, 0xc3,
+            0xd3, 0xd4, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xf0,
+            0xf9, 0x5a, 0x47, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5,
+            0xf6, 0xf7, 0xf8
+        };
+        for (int i : l1) {
+            TAG_LENGTH_MAP.put(i, 1);
+        }
+        for (int i : l2) {
+            TAG_LENGTH_MAP.put(i, 2);
+        }
+        for (int i : l3) {
+            TAG_LENGTH_MAP.put(i, 3);
+        }
+        for (int i : l4) {
+            TAG_LENGTH_MAP.put(i, 4);
+        }
+        TAG_LENGTH_MAP.put(TAG_COORDINATES, 9);
+        TAG_LENGTH_MAP.put(TAG_IMEI, 15);
+        TAG_LENGTH_MAP.put(TAG_REFRIGERATOR, 7); // variable length
+        TAG_LENGTH_MAP.put(TAG_PRESSURE, 68);
+    }
+
+    private static int getTagLength(int tag) {
+        return TAG_LENGTH_MAP.get(tag);
+    }
+
     private void sendReply(Channel channel, int checksum) {
         ChannelBuffer reply = ChannelBuffers.directBuffer(ByteOrder.LITTLE_ENDIAN, 3);
         reply.writeByte(0x02);
@@ -82,97 +109,106 @@ public class GalileoProtocolDecoder extends BaseProtocolDecoder {
             channel.write(reply);
         }
     }
-    
-    private Long deviceId;
-    
+
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
 
         ChannelBuffer buf = (ChannelBuffer) msg;
-        
+
         buf.readUnsignedByte(); // header
         int length = (buf.readUnsignedShort() & 0x7fff) + 3;
-        
-        // Create new position
+
+        List<Position> positions = new LinkedList<>();
+        Set<Integer> tags = new HashSet<>();
+        boolean hasLocation = false;
+
         Position position = new Position();
-        ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("galileo");
-        
+
         while (buf.readerIndex() < length) {
+
+            // Check if new message started
             int tag = buf.readUnsignedByte();
+            if (tags.contains(tag)) {
+                if (hasLocation && position.getFixTime() != null) {
+                    positions.add(position);
+                }
+                tags.clear();
+                hasLocation = false;
+                position = new Position();
+            }
+            tags.add(tag);
+
             switch (tag) {
 
                 case TAG_IMEI:
-                    String imei = buf.toString(buf.readerIndex(), 15, Charset.defaultCharset());
+                    String imei = buf.toString(buf.readerIndex(), 15, StandardCharsets.US_ASCII);
                     buf.skipBytes(imei.length());
-                    try {
-                        deviceId = getDataManager().getDeviceByImei(imei).getId();
-                    } catch(Exception error) {
-                        Log.warning("Unknown device - " + imei);
-                    }
+                    identify(imei, channel, remoteAddress);
                     break;
 
                 case TAG_DATE:
                     position.setTime(new Date(buf.readUnsignedInt() * 1000));
                     break;
-                    
+
                 case TAG_COORDINATES:
+                    hasLocation = true;
                     position.setValid((buf.readUnsignedByte() & 0xf0) == 0x00);
                     position.setLatitude(buf.readInt() / 1000000.0);
                     position.setLongitude(buf.readInt() / 1000000.0);
                     break;
-                    
+
                 case TAG_SPEED_COURSE:
                     position.setSpeed(buf.readUnsignedShort() * 0.0539957);
                     position.setCourse(buf.readUnsignedShort() * 0.1);
                     break;
-                    
+
                 case TAG_ALTITUDE:
-                    position.setAltitude((double) buf.readShort());
+                    position.setAltitude(buf.readShort());
                     break;
-                    
+
                 case TAG_STATUS:
-                    extendedInfo.set("status", buf.readUnsignedShort());
+                    position.set(Position.KEY_STATUS, buf.readUnsignedShort());
                     break;
-                    
+
                 case TAG_POWER:
-                    extendedInfo.set("power", buf.readUnsignedShort());
+                    position.set(Position.KEY_POWER, buf.readUnsignedShort());
                     break;
-                    
+
                 case TAG_BATTERY:
-                    extendedInfo.set("battery", buf.readUnsignedShort());
+                    position.set(Position.KEY_BATTERY, buf.readUnsignedShort());
                     break;
-                    
-                case TAG_MILAGE:
-                    extendedInfo.set("milage", buf.readUnsignedInt());
+
+                case TAG_ODOMETER:
+                    position.set(Position.KEY_ODOMETER, buf.readUnsignedInt());
                     break;
-                    
+
                 default:
                     buf.skipBytes(getTagLength(tag));
                     break;
-                    
+
             }
         }
+        if (hasLocation && position.getFixTime() != null) {
+            positions.add(position);
+        }
 
-        if (deviceId == null) {
+        if (!hasDeviceId()) {
             Log.warning("Unknown device");
             return null;
         }
-        
-        position.setDeviceId(deviceId);
+
         sendReply(channel, buf.readUnsignedShort());
 
-        if (position.getValid() == null || position.getTime() == null || position.getSpeed() == null) {
-            return null;
+        for (Position p : positions) {
+            p.setProtocol(getProtocolName());
+            p.setDeviceId(getDeviceId());
         }
 
-        if (position.getAltitude() == null) {
-            position.setAltitude(0.0);
+        if (positions.isEmpty()) {
+            return null;
         }
-        
-        position.setExtendedInfo(extendedInfo.toString());
-        return position;
+        return positions;
     }
 
 }

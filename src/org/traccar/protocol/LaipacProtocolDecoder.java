@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 Anton Tananaev (anton.tananaev@gmail.com)
+ * Copyright 2013 - 2014 Anton Tananaev (anton.tananaev@gmail.com)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,121 +15,85 @@
  */
 package org.traccar.protocol;
 
-import java.util.Calendar;
-import java.util.TimeZone;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
-import org.traccar.helper.Crc;
-import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
+import org.traccar.helper.Checksum;
+import org.traccar.helper.DateBuilder;
+import org.traccar.helper.Parser;
+import org.traccar.helper.PatternBuilder;
 import org.traccar.model.Position;
+
+import java.net.SocketAddress;
+import java.util.regex.Pattern;
 
 public class LaipacProtocolDecoder extends BaseProtocolDecoder {
 
-    public LaipacProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
+    public LaipacProtocolDecoder(LaipacProtocol protocol) {
+        super(protocol);
     }
 
-    static private Pattern pattern = Pattern.compile(
-            "\\$AVRMC," +
-            "(\\d+)," +                    // Identifier
-            "(\\d{2})(\\d{2})(\\d{2})," +  // Time (HHMMSS)
-            "([AVavr])," +                 // Validity
-            "(\\d{2})(\\d{2}\\.\\d+)," +   // Latitude (DDMM.MMMM)
-            "([NS])," +
-            "(\\d{3})(\\d{2}\\.\\d+)," +   // Longitude (DDDMM.MMMM)
-            "([EW])," +
-            "(\\d+\\.\\d+)," +             // Speed
-            "(\\d+\\.\\d+)," +             // Course
-            "(\\d{2})(\\d{2})(\\d{2})," +  // Date (DDMMYY)
-            "(.)," +                       // Type
-            "[^\\*]+\\*" +
-            "(\\p{XDigit}{2})");           // Checksum
-    
+    private static final Pattern PATTERN = new PatternBuilder()
+            .text("$AVRMC,")
+            .expression("([^,]+),")              // identifier
+            .number("(dd)(dd)(dd),")             // time
+            .expression("([AVRavr]),")           // validity
+            .number("(dd)(dd.d+),")              // latitude
+            .expression("([NS]),")
+            .number("(ddd)(dd.d+),")             // longitude
+            .number("([EW]),")
+            .number("(d+.d+),")                  // speed
+            .number("(d+.d+),")                  // course
+            .number("(dd)(dd)(dd),")             // date (ddmmyy)
+            .expression("(.),")                  // type
+            .expression("[^*]+").text("*")
+            .number("(xx)")                      // checksum
+            .compile();
+
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
 
         String sentence = (String) msg;
 
-        // Heartbeat
-        if (sentence.startsWith("$ECHK")) {
-            if (channel != null) {
-                channel.write(sentence + "\r\n");
-            }
+        if (sentence.startsWith("$ECHK") && channel != null) {
+            channel.write(sentence + "\r\n"); // heartbeat
             return null;
         }
-        
-        // Parse message
-        Matcher parser = pattern.matcher(sentence);
+
+        Parser parser = new Parser(PATTERN, sentence);
         if (!parser.matches()) {
             return null;
         }
 
-        // Create new position
         Position position = new Position();
-        ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("laipac");
-        Integer index = 1;
+        position.setProtocol(getProtocolName());
 
-        // Identification
-        String id = parser.group(index++);
-        try {
-            position.setDeviceId(getDataManager().getDeviceByImei(id).getId());
-        } catch(Exception error) {
-            Log.warning("Unknown device - " + id);
+        if (!identify(parser.next(), channel, remoteAddress)) {
+            return null;
         }
+        position.setDeviceId(getDeviceId());
 
-        // Time
-        Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-        time.clear();
-        time.set(Calendar.HOUR, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.MINUTE, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.SECOND, Integer.valueOf(parser.group(index++)));
+        DateBuilder dateBuilder = new DateBuilder()
+                .setTime(parser.nextInt(), parser.nextInt(), parser.nextInt());
 
-        // Validity
-        String status = parser.group(index++);
-        position.setValid(status.compareToIgnoreCase("A") == 0 ? true : false);
+        String status = parser.next();
+        position.setValid(status.toUpperCase().equals("A"));
 
-        // Latitude
-        Double latitude = Double.valueOf(parser.group(index++));
-        latitude += Double.valueOf(parser.group(index++)) / 60;
-        if (parser.group(index++).compareTo("S") == 0) latitude = -latitude;
-        position.setLatitude(latitude);
+        position.setLatitude(parser.nextCoordinate());
+        position.setLongitude(parser.nextCoordinate());
+        position.setSpeed(parser.nextDouble());
+        position.setCourse(parser.nextDouble());
 
-        // Longitude
-        Double longitude = Double.valueOf(parser.group(index++));
-        longitude += Double.valueOf(parser.group(index++)) / 60;
-        if (parser.group(index++).compareTo("W") == 0) longitude = -longitude;
-        position.setLongitude(longitude);
+        dateBuilder.setDateReverse(parser.nextInt(), parser.nextInt(), parser.nextInt());
+        position.setTime(dateBuilder.getDate());
 
-        // Speed
-        position.setSpeed(Double.valueOf(parser.group(index++)));
-
-        // Course
-        position.setCourse(Double.valueOf(parser.group(index++)));
-
-        // Date
-        time.set(Calendar.DAY_OF_MONTH, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.MONTH, Integer.valueOf(parser.group(index++)) - 1);
-        time.set(Calendar.YEAR, 2000 + Integer.valueOf(parser.group(index++)));
-        position.setTime(time.getTime());
-
-        // Altitude
-        position.setAltitude(0.0);
-
-        // Response
-        String type = parser.group(index++);
-        String checksum = parser.group(index++);
+        String type = parser.next();
+        String checksum = parser.next();
         String response = null;
 
         if (type.equals("0") && Character.isLowerCase(status.charAt(0))) {
             response = "$EAVACK,0," + checksum;
-            response += Crc.nmeaChecksum(response);
+            response += Checksum.nmea(response);
         } else if (type.equals("S") || type.equals("T")) {
             response = "$AVCFG,00000000,t*21";
         } else if (type.equals("3")) {
@@ -137,12 +101,11 @@ public class LaipacProtocolDecoder extends BaseProtocolDecoder {
         } else if (type.equals("X") || type.equals("4")) {
             response = "$AVCFG,00000000,x*2D";
         }
-        
+
         if (response != null && channel != null) {
             channel.write(response + "\r\n");
         }
 
-        position.setExtendedInfo(extendedInfo.toString());
         return position;
     }
 

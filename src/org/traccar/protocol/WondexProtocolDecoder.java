@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 - 2014 Anton Tananaev (anton.tananaev@gmail.com)
+ * Copyright 2013 - 2015 Anton Tananaev (anton.tananaev@gmail.com)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,108 +15,111 @@
  */
 package org.traccar.protocol;
 
-import java.util.Calendar;
-import java.util.TimeZone;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
-import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
+import org.traccar.helper.DateBuilder;
+import org.traccar.helper.Parser;
+import org.traccar.helper.PatternBuilder;
+import org.traccar.helper.UnitsConverter;
 import org.traccar.model.Position;
+
+import java.net.SocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Date;
+import java.util.regex.Pattern;
 
 public class WondexProtocolDecoder extends BaseProtocolDecoder {
 
-    public WondexProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
+    public WondexProtocolDecoder(WondexProtocol protocol) {
+        super(protocol);
     }
 
-    private static final Pattern pattern = Pattern.compile(
-            "[^\\d]*" +                    // Header
-            "(\\d+)," +                    // Device Identifier
-            "(\\d{4})(\\d{2})(\\d{2})" +   // Date (YYYYMMDD)
-            "(\\d{2})(\\d{2})(\\d{2})," +  // Time (HHMMSS)
-            "(-?\\d+\\.\\d+)," +           // Longitude
-            "(-?\\d+\\.\\d+)," +           // Latitude
-            "(\\d+)," +                    // Speed
-            "(\\d+)," +                    // Course
-            "(-?\\d+)," +                  // Altitude
-            "(\\d+)," +                    // Satellites
-            "(\\d+),?" +                   // Event
-            "(\\d+\\.\\d+)?,?" +           // Milage
-            "(\\d+)?,?" +                  // Input
-            "(\\d+\\.\\d+)?,?" +           // ADC1
-            "(\\d+\\.\\d+)?,?" +           // ADC2
-            "(\\d+)?");                    // Output
+    private static final Pattern PATTERN = new PatternBuilder()
+            .number("[^d]*")                     // deader
+            .number("(d+),")                     // device identifier
+            .number("(dddd)(dd)(dd)")            // date
+            .number("(dd)(dd)(dd),")             // time
+            .number("(-?d+.d+),")                // longitude
+            .number("(-?d+.d+),")                // latitude
+            .number("(d+),")                     // speed
+            .number("(d+),")                     // course
+            .number("(-?d+.?d*),")               // altitude
+            .number("(d+),")                     // satellites
+            .number("(d+),?")                    // event
+            .number("(d+.d+)V,").optional()      // battery
+            .number("(d+.d+)?,?")                // odometer
+            .number("(d+)?,?")                   // input
+            .number("(d+.d+)?,?")                // adc1
+            .number("(d+.d+)?,?")                // adc2
+            .number("(d+)?")                     // output
+            .any()
+            .compile();
 
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
 
-        // Parse message
-        Matcher parser = pattern.matcher((String) msg);
-        if (!parser.matches()) {
+        ChannelBuffer buf = (ChannelBuffer) msg;
+
+        if (buf.getUnsignedByte(0) == 0xD0) {
+
+            long deviceId = ((Long.reverseBytes(buf.getLong(0))) >> 32) & 0xFFFFFFFFL;
+            identify(String.valueOf(deviceId), channel, remoteAddress);
+
             return null;
+        } else if (buf.toString(StandardCharsets.US_ASCII).startsWith("$OK:")
+            || buf.toString(StandardCharsets.US_ASCII).startsWith("$ERR:")) {
+
+            Position position = new Position();
+            position.setProtocol(getProtocolName());
+            position.setDeviceId(getDeviceId());
+            getLastLocation(position, new Date());
+            position.setValid(false);
+            position.set(Position.KEY_RESULT, buf.toString(StandardCharsets.US_ASCII));
+
+            return position;
+        } else {
+
+            Parser parser = new Parser(PATTERN, buf.toString(StandardCharsets.US_ASCII));
+            if (!parser.matches()) {
+                return null;
+            }
+
+            Position position = new Position();
+            position.setProtocol(getProtocolName());
+
+            if (!identify(parser.next(), channel, remoteAddress)) {
+                return null;
+            }
+            position.setDeviceId(getDeviceId());
+
+            DateBuilder dateBuilder = new DateBuilder()
+                    .setDate(parser.nextInt(), parser.nextInt(), parser.nextInt())
+                    .setTime(parser.nextInt(), parser.nextInt(), parser.nextInt());
+            position.setTime(dateBuilder.getDate());
+
+            position.setLongitude(parser.nextDouble());
+            position.setLatitude(parser.nextDouble());
+            position.setSpeed(UnitsConverter.knotsFromKph(parser.nextDouble()));
+            position.setCourse(parser.nextDouble());
+            position.setAltitude(parser.nextDouble());
+
+            int satellites = parser.nextInt();
+            position.setValid(satellites >= 3);
+            position.set(Position.KEY_SATELLITES, satellites);
+
+            position.set(Position.KEY_EVENT, parser.next());
+            position.set(Position.KEY_BATTERY, parser.next());
+            position.set(Position.KEY_ODOMETER, parser.next());
+            position.set(Position.KEY_INPUT, parser.next());
+            position.set(Position.PREFIX_ADC + 1, parser.next());
+            position.set(Position.PREFIX_ADC + 2, parser.next());
+            position.set(Position.KEY_OUTPUT, parser.next());
+
+            return position;
         }
 
-        // Create new position
-        Position position = new Position();
-        ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("wondex");
-        int index = 1;
-
-        // Device identifier
-        String id = parser.group(index++);
-        try {
-            position.setDeviceId(getDataManager().getDeviceByImei(id).getId());
-        } catch(Exception error) {
-            Log.warning("Unknown device - " + id);
-            return null;
-        }
-
-        // Time
-        Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-        time.clear();
-        time.set(Calendar.YEAR, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.MONTH, Integer.valueOf(parser.group(index++)) - 1);
-        time.set(Calendar.DAY_OF_MONTH, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.HOUR, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.MINUTE, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.SECOND, Integer.valueOf(parser.group(index++)));
-        position.setTime(time.getTime());
-
-        // Position data
-        position.setLongitude(Double.valueOf(parser.group(index++)));
-        position.setLatitude(Double.valueOf(parser.group(index++)));
-        position.setSpeed(Double.valueOf(parser.group(index++)) * 0.539957);
-        position.setCourse(Double.valueOf(parser.group(index++)));
-        position.setAltitude(Double.valueOf(parser.group(index++)));
-
-        // Satellites
-        int satellites = Integer.valueOf(parser.group(index++));
-        position.setValid(satellites >= 3);
-        extendedInfo.set("satellites", satellites);
-        
-        // Event
-        extendedInfo.set("event", parser.group(index++));
-        
-        // Milage
-        extendedInfo.set("milage", parser.group(index++));
-        
-        // Input
-        extendedInfo.set("input", parser.group(index++));
-        
-        // ADC
-        extendedInfo.set("adc1", parser.group(index++));
-        extendedInfo.set("adc2", parser.group(index++));
-        
-        // Output
-        extendedInfo.set("output", parser.group(index++));
-
-        position.setExtendedInfo(extendedInfo.toString());
-        return position;
     }
 
 }

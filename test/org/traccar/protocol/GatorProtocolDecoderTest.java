@@ -1,25 +1,46 @@
 package org.traccar.protocol;
 
-import org.traccar.helper.TestDataManager;
-import org.jboss.netty.buffer.ChannelBuffers;
-import static org.traccar.helper.DecoderVerifier.verify;
+import org.junit.Assert;
 import org.junit.Test;
-import org.traccar.helper.ChannelBufferTools;
+import org.traccar.ProtocolTest;
 
-public class GatorProtocolDecoderTest {
+public class GatorProtocolDecoderTest extends ProtocolTest {
+    
+    @Test
+    public void testDecodeId() {
+        
+        Assert.assertEquals("3512345006", GatorProtocolDecoder.decodeId(12, 162, 50, 134));
+        
+    }
 
     @Test
     public void testDecode() throws Exception {
 
-        GatorProtocolDecoder decoder = new GatorProtocolDecoder(null);
-        decoder.setDataManager(new TestDataManager());
+        GatorProtocolDecoder decoder = new GatorProtocolDecoder(new GatorProtocol());
 
-        int[] buf1 = {0x24,0x24,0x81,0x00,0x23,0x0C,0xA2,0x32,0x85,0x10,0x03,0x06,0x14,0x59,0x07,0x02,0x23,0x46,0x90,0x11,0x35,0x29,0x47,0x00,0x00,0x00,0x00,0xC0,0x40,0x01,0x01,0x2C,0x0E,0x11,0x00,0x00,0x00,0x21,0xCB,0x0D};
-        verify(decoder.decode(null, null, ChannelBuffers.wrappedBuffer(ChannelBufferTools.convertArray(buf1))));
+        verifyNothing(decoder, binary(
+                "242421000658e3d851150d"));
 
-        int[] buf2 = {0x24,0x24,0x80,0x00,0x23,0xc2,0x63,0x1e,0x00,0x11,0x12,0x20,0x10,0x49,0x09,0x83,0x32,0x68,0x64,0x87,0x03,0x80,0x41,0x00,0x00,0x00,0x00,0xc0,0x47,0x00,0x00,0x00,0x0b,0x4e,0x00,0x00,0x00,0x00,0x55,0x0d};
-        verify(decoder.decode(null, null, ChannelBuffers.wrappedBuffer(ChannelBufferTools.convertArray(buf2))));
+        verifyAttributes(decoder, binary(
+                "242480002658e3d851a60101c662bc00000000000000000000000000470007a30b0c00b10fc900ff00460d"));
 
+        verifyNothing(decoder, binary(
+                "242421000643e30282070d"));
+
+        verifyPosition(decoder, binary(
+                "24248000260009632d141121072702059226180104367500000000c04700079c0c34000ad80b00ff000a0d"),
+                position("2014-11-21 07:27:02.000", true, 59.37697, 10.72792));
+
+        verifyPosition(decoder, binary(
+                "24248100230CA23285100306145907022346901135294700000000C04001012C0E1100000021CB0D"));
+
+        verifyPosition(decoder, binary(
+                "2424800023c2631e00111220104909833268648703804100000000c0470000000b4e00000000550d"),
+                position("2011-12-20 10:49:09.000", true, -33.44773, -70.63402));
+
+        verifyPosition(decoder, binary(
+                "24248000260009632d141121072702059226180104367500000000c04700079c0c34000ad80b00ff000a0d"));
+        
     }
 
 }

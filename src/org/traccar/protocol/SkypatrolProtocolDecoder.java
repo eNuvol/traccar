@@ -15,209 +15,169 @@
  */
 package org.traccar.protocol;
 
-import java.nio.charset.Charset;
-import java.util.Calendar;
-import java.util.TimeZone;
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
+import org.traccar.Context;
+import org.traccar.helper.BitUtil;
+import org.traccar.helper.DateBuilder;
 import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
 import org.traccar.model.Position;
+
+import java.net.SocketAddress;
+import java.nio.charset.StandardCharsets;
 
 public class SkypatrolProtocolDecoder extends BaseProtocolDecoder {
 
-    public SkypatrolProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
-    }
+    private final long defaultMask;
 
-    private static boolean checkBit(long mask, int bit) {
-        long checkMask = 1 << bit;
-        return (mask & checkMask) == checkMask;
+    public SkypatrolProtocolDecoder(SkypatrolProtocol protocol) {
+        super(protocol);
+        defaultMask = Context.getConfig().getInteger(getProtocolName() + ".mask");
     }
 
     private static double convertCoordinate(long coordinate) {
         int sign = 1;
-        if (coordinate > 0x7fffffffl) {
+        if (coordinate > 0x7fffffffL) {
             sign = -1;
-            coordinate = 0xffffffffl - coordinate;
+            coordinate = 0xffffffffL - coordinate;
         }
 
-        double degrees = coordinate / 1000000;
-        degrees += (coordinate % 1000000) / 600000.0;
+        long degrees = coordinate / 1000000;
+        double minutes = (coordinate % 1000000) / 10000.0;
 
-        return sign * degrees;
+        return sign * (degrees + minutes / 60);
     }
 
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
 
         ChannelBuffer buf = (ChannelBuffer) msg;
 
-        // Read header
         int apiNumber = buf.readUnsignedShort();
         int commandType = buf.readUnsignedByte();
-        int messageType = buf.getUnsignedByte(buf.readerIndex()) >> 4;
-        boolean needAck = (buf.readUnsignedByte() & 0xf) == 1;
-        long mask = 0;
+        int messageType = BitUtil.from(buf.readUnsignedByte(), 4);
+        long mask = defaultMask;
         if (buf.readUnsignedByte() == 4) {
             mask = buf.readUnsignedInt();
         }
 
         // Binary position report
-        if (apiNumber == 5 &&
-            commandType == 2 &&
-            messageType == 1 &&
-            checkBit(mask, 0)) {
+        if (apiNumber == 5 && commandType == 2 && messageType == 1 && BitUtil.check(mask, 0)) {
 
-            // Create new position
             Position position = new Position();
-            ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("skypatrol");
+            position.setProtocol(getProtocolName());
 
-            // Status code
-            if (checkBit(mask, 1)) {
-                extendedInfo.set("status", buf.readUnsignedInt());
+            if (BitUtil.check(mask, 1)) {
+                position.set(Position.KEY_STATUS, buf.readUnsignedInt());
             }
 
-            // Device id
-            String id = null;
-            if (checkBit(mask, 23)) {
-                id = buf.toString(buf.readerIndex(), 8, Charset.defaultCharset()).trim();
+            String id;
+            if (BitUtil.check(mask, 23)) {
+                id = buf.toString(buf.readerIndex(), 8, StandardCharsets.US_ASCII).trim();
                 buf.skipBytes(8);
-            } else if (checkBit(mask, 2)) {
-                id = buf.toString(buf.readerIndex(), 22, Charset.defaultCharset()).trim();
+            } else if (BitUtil.check(mask, 2)) {
+                id = buf.toString(buf.readerIndex(), 22, StandardCharsets.US_ASCII).trim();
                 buf.skipBytes(22);
             } else {
                 Log.warning("No device id field");
                 return null;
             }
-            try {
-                position.setDeviceId(getDataManager().getDeviceByImei(id).getId());
-            } catch(Exception error) {
-                Log.warning("Unknown device - " + id);
+            if (!identify(id, channel, remoteAddress)) {
                 return null;
             }
+            position.setDeviceId(getDeviceId());
 
-            // IO data
-            if (checkBit(mask, 3)) {
-                buf.readUnsignedShort();
+            if (BitUtil.check(mask, 3)) {
+                buf.readUnsignedShort(); // io data
             }
 
-            // ADC 1
-            if (checkBit(mask, 4)) {
-                buf.readUnsignedShort();
+            if (BitUtil.check(mask, 4)) {
+                buf.readUnsignedShort(); // adc 1
             }
 
-            // ADC 2
-            if (checkBit(mask, 5)) {
-                buf.readUnsignedShort();
+            if (BitUtil.check(mask, 5)) {
+                buf.readUnsignedShort(); // adc 2
             }
 
-            // Function category
-            if (checkBit(mask, 7)) {
-                buf.readUnsignedByte();
+            if (BitUtil.check(mask, 7)) {
+                buf.readUnsignedByte(); // function category
             }
 
-            Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-            time.clear();
+            DateBuilder dateBuilder = new DateBuilder();
 
-            // Date
-            if (checkBit(mask, 8)) {
-                time.set(Calendar.DAY_OF_MONTH, buf.readUnsignedByte());
-                time.set(Calendar.MONTH, buf.readUnsignedByte() - 1);
-                time.set(Calendar.YEAR, 2000 + buf.readUnsignedByte());
+            if (BitUtil.check(mask, 8)) {
+                dateBuilder.setDateReverse(
+                        buf.readUnsignedByte(), buf.readUnsignedByte(), buf.readUnsignedByte());
             }
 
-            // GPS status
-            if (checkBit(mask, 9)) {
-                position.setValid(buf.readUnsignedByte() == 1);
+            if (BitUtil.check(mask, 9)) {
+                position.setValid(buf.readUnsignedByte() == 1); // gps status
             }
 
-            // Latitude
-            if (checkBit(mask, 10)) {
+            if (BitUtil.check(mask, 10)) {
                 position.setLatitude(convertCoordinate(buf.readUnsignedInt()));
             }
 
-            // Longitude
-            if (checkBit(mask, 11)) {
+            if (BitUtil.check(mask, 11)) {
                 position.setLongitude(convertCoordinate(buf.readUnsignedInt()));
             }
 
-            // Speed
-            if (checkBit(mask, 12)) {
+            if (BitUtil.check(mask, 12)) {
                 position.setSpeed(buf.readUnsignedShort() / 10.0);
             }
 
-            // Course
-            if (checkBit(mask, 13)) {
+            if (BitUtil.check(mask, 13)) {
                 position.setCourse(buf.readUnsignedShort() / 10.0);
             }
 
-            // Time
-            if (checkBit(mask, 14)) {
-                time.set(Calendar.HOUR, buf.readUnsignedByte());
-                time.set(Calendar.MINUTE, buf.readUnsignedByte());
-                time.set(Calendar.SECOND, buf.readUnsignedByte());
+            if (BitUtil.check(mask, 14)) {
+                dateBuilder.setTime(
+                        buf.readUnsignedByte(), buf.readUnsignedByte(), buf.readUnsignedByte());
             }
 
-            position.setTime(time.getTime());
+            position.setTime(dateBuilder.getDate());
 
-            // Altitude
-            if (checkBit(mask, 15)) {
-                position.setAltitude((double) buf.readMedium());
+            if (BitUtil.check(mask, 15)) {
+                position.setAltitude(buf.readMedium());
             }
 
-            // Satellites
-            if (checkBit(mask, 16)) {
-                extendedInfo.set("satellites", buf.readUnsignedByte());
+            if (BitUtil.check(mask, 16)) {
+                position.set(Position.KEY_SATELLITES, buf.readUnsignedByte());
             }
 
-            // Battery percentage
-            if (checkBit(mask, 17)) {
-                buf.readUnsignedShort();
+            if (BitUtil.check(mask, 17)) {
+                buf.readUnsignedShort(); // battery percentage
             }
 
-            // Trip milage
-            if (checkBit(mask, 20)) {
-                extendedInfo.set("trip", buf.readUnsignedInt());
+            if (BitUtil.check(mask, 20)) {
+                position.set("trip", buf.readUnsignedInt());
             }
 
-            // Milage
-            if (checkBit(mask, 21)) {
-                extendedInfo.set("milage", buf.readUnsignedInt());
+            if (BitUtil.check(mask, 21)) {
+                position.set(Position.KEY_ODOMETER, buf.readUnsignedInt());
             }
 
-            // Time of message generation
-            if (checkBit(mask, 22)) {
-                buf.skipBytes(6);
+            if (BitUtil.check(mask, 22)) {
+                buf.skipBytes(6); // time of message generation
             }
 
-            // Battery level
-            if (checkBit(mask, 24)) {
-                extendedInfo.set("power", buf.readUnsignedShort() / 1000.0);
+            if (BitUtil.check(mask, 24)) {
+                position.set(Position.KEY_POWER, buf.readUnsignedShort() / 1000.0);
             }
 
-            // GPS overspeed
-            if (checkBit(mask, 25)) {
-                buf.skipBytes(18);
+            if (BitUtil.check(mask, 25)) {
+                buf.skipBytes(18); // gps overspeed
             }
 
-            // Cell information
-            if (checkBit(mask, 26)) {
-                buf.skipBytes(54);
+            if (BitUtil.check(mask, 26)) {
+                buf.skipBytes(54); // cell information
             }
 
-            // Sequence number
-            if (checkBit(mask, 28)) {
-                extendedInfo.set("index", buf.readUnsignedShort());
+            if (BitUtil.check(mask, 28)) {
+                position.set(Position.KEY_INDEX, buf.readUnsignedShort());
             }
-
-            // Extended info
-            position.setExtendedInfo(extendedInfo.toString());
 
             return position;
         }

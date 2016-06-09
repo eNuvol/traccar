@@ -1,5 +1,5 @@
 /*
- * Copyright 2012 - 2013 Anton Tananaev (anton.tananaev@gmail.com)
+ * Copyright 2012 - 2016 Anton Tananaev (anton.tananaev@gmail.com)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,35 +15,47 @@
  */
 package org.traccar;
 
-import java.net.InetSocketAddress;
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.buffer.ChannelBuffers;
-import org.jboss.netty.channel.*;
+import org.jboss.netty.channel.ChannelEvent;
+import org.jboss.netty.channel.ChannelHandler;
+import org.jboss.netty.channel.ChannelHandlerContext;
+import org.jboss.netty.channel.ChannelPipeline;
+import org.jboss.netty.channel.ChannelPipelineFactory;
+import org.jboss.netty.channel.ChannelStateEvent;
+import org.jboss.netty.channel.Channels;
+import org.jboss.netty.channel.DownstreamMessageEvent;
+import org.jboss.netty.channel.MessageEvent;
+import org.jboss.netty.channel.SimpleChannelHandler;
 import org.jboss.netty.handler.logging.LoggingHandler;
 import org.jboss.netty.handler.timeout.IdleStateHandler;
-import org.traccar.geocode.ReverseGeocoder;
+import org.traccar.events.CommandResultEventHandler;
+import org.traccar.events.MotionEventHandler;
+import org.traccar.events.OverspeedEventHandler;
 import org.traccar.helper.Log;
-import org.traccar.model.DataManager;
 
-/**
-  * Base pipeline factory
-  */
+import java.net.InetSocketAddress;
+
 public abstract class BasePipelineFactory implements ChannelPipelineFactory {
 
-    private TrackerServer server;
-    private DataManager dataManager;
-    private Boolean loggerEnabled;
-    private Integer resetDelay;
-    private ReverseGeocoder reverseGeocoder;
+    private final TrackerServer server;
+    private int timeout;
 
-    /**
-     * Open channel handler
-     */
-    protected class OpenChannelHandler extends SimpleChannelHandler {
+    private FilterHandler filterHandler;
+    private DistanceHandler distanceHandler;
+    private ReverseGeocoderHandler reverseGeocoderHandler;
+    private LocationProviderHandler locationProviderHandler;
+    private HemisphereHandler hemisphereHandler;
 
-        private TrackerServer server;
+    private CommandResultEventHandler commandResultEventHandler;
+    private OverspeedEventHandler overspeedEventHandler;
+    private MotionEventHandler motionEventHandler;
 
-        public OpenChannelHandler(TrackerServer server) {
+    private static final class OpenChannelHandler extends SimpleChannelHandler {
+
+        private final TrackerServer server;
+
+        private OpenChannelHandler(TrackerServer server) {
             this.server = server;
         }
 
@@ -53,10 +65,7 @@ public abstract class BasePipelineFactory implements ChannelPipelineFactory {
         }
     }
 
-    /**
-     * Logging using global logger
-     */
-    protected class StandardLoggingHandler extends LoggingHandler {
+    private static class StandardLoggingHandler extends LoggingHandler {
 
         @Override
         public void log(ChannelEvent e) {
@@ -64,39 +73,73 @@ public abstract class BasePipelineFactory implements ChannelPipelineFactory {
                 MessageEvent event = (MessageEvent) e;
                 StringBuilder msg = new StringBuilder();
 
-                msg.append("[").append(((InetSocketAddress) e.getChannel().getLocalAddress()).getPort());
-                msg.append((e instanceof DownstreamMessageEvent) ? " -> " : " <- ");
-                msg.append(((InetSocketAddress) event.getRemoteAddress()).getAddress().getHostAddress()).append("]");
+                msg.append("[").append(String.format("%08X", e.getChannel().getId())).append(": ");
+                msg.append(((InetSocketAddress) e.getChannel().getLocalAddress()).getPort());
+                if (e instanceof DownstreamMessageEvent) {
+                    msg.append(" > ");
+                } else {
+                    msg.append(" < ");
+                }
 
-                // Append hex message
+                if (event.getRemoteAddress() != null) {
+                    msg.append(((InetSocketAddress) event.getRemoteAddress()).getHostString());
+                } else {
+                    msg.append("null");
+                }
+                msg.append("]");
+
                 if (event.getMessage() instanceof ChannelBuffer) {
-                    msg.append(" - HEX: ");
+                    msg.append(" HEX: ");
                     msg.append(ChannelBuffers.hexDump((ChannelBuffer) event.getMessage()));
                 }
 
                 Log.debug(msg.toString());
-            } else if (e instanceof ExceptionEvent) {
-                ExceptionEvent event = (ExceptionEvent) e;
-                Log.warning(event.getCause());
             }
         }
 
     }
 
-    public BasePipelineFactory(ServerManager serverManager, TrackerServer server, String protocol) {
+    public BasePipelineFactory(TrackerServer server, String protocol) {
         this.server = server;
-        dataManager = serverManager.getDataManager();
-        loggerEnabled = serverManager.isLoggerEnabled();
-        reverseGeocoder = serverManager.getReverseGeocoder();
 
-        String resetDelayProperty = serverManager.getProperties().getProperty(protocol + ".resetDelay");
-        if (resetDelayProperty != null) {
-            resetDelay = Integer.valueOf(resetDelayProperty);
+        timeout = Context.getConfig().getInteger(protocol + ".timeout", 0);
+        if (timeout == 0) {
+            timeout = Context.getConfig().getInteger(protocol + ".resetDelay", 0); // temporary
         }
-    }
 
-    protected DataManager getDataManager() {
-        return dataManager;
+        if (Context.getConfig().getBoolean("filter.enable")) {
+            filterHandler = new FilterHandler();
+        }
+
+        if (Context.getReverseGeocoder() != null) {
+            reverseGeocoderHandler = new ReverseGeocoderHandler(
+                    Context.getReverseGeocoder(), Context.getConfig().getBoolean("geocoder.processInvalidPositions"));
+        }
+
+        if (Context.getLocationProvider() != null) {
+            locationProviderHandler = new LocationProviderHandler(
+                    Context.getLocationProvider(), Context.getConfig().getBoolean("location.processInvalidPositions"));
+        }
+
+        if (Context.getConfig().getBoolean("distance.enable")) {
+            distanceHandler = new DistanceHandler();
+        }
+
+        if (Context.getConfig().hasKey("location.latitudeHemisphere")
+                || Context.getConfig().hasKey("location.longitudeHemisphere")) {
+            hemisphereHandler = new HemisphereHandler();
+        }
+
+        commandResultEventHandler = new CommandResultEventHandler();
+
+        if (Context.getConfig().getBoolean("event.overspeedHandler")) {
+            overspeedEventHandler = new OverspeedEventHandler();
+        }
+
+        if (Context.getConfig().getBoolean("event.motionHandler")) {
+            motionEventHandler = new MotionEventHandler();
+        }
+
     }
 
     protected abstract void addSpecificHandlers(ChannelPipeline pipeline);
@@ -104,19 +147,70 @@ public abstract class BasePipelineFactory implements ChannelPipelineFactory {
     @Override
     public ChannelPipeline getPipeline() {
         ChannelPipeline pipeline = Channels.pipeline();
-        if (resetDelay != null) {
-            pipeline.addLast("idleHandler", new IdleStateHandler(GlobalTimer.getTimer(), resetDelay, 0, 0));
+        if (timeout > 0 && !server.isConnectionless()) {
+            pipeline.addLast("idleHandler", new IdleStateHandler(GlobalTimer.getTimer(), timeout, 0, 0));
         }
         pipeline.addLast("openHandler", new OpenChannelHandler(server));
-        if (loggerEnabled) {
+        if (Context.isLoggerEnabled()) {
             pipeline.addLast("logger", new StandardLoggingHandler());
         }
+
         addSpecificHandlers(pipeline);
-        if (reverseGeocoder != null) {
-            pipeline.addLast("geocoder", new ReverseGeocoderHandler(reverseGeocoder));
+
+        if (hemisphereHandler != null) {
+            pipeline.addLast("hemisphere", hemisphereHandler);
         }
-        pipeline.addLast("handler", new TrackerEventHandler(dataManager));
+        if (distanceHandler != null) {
+            pipeline.addLast("distance", distanceHandler);
+        }
+        if (reverseGeocoderHandler != null) {
+            pipeline.addLast("geocoder", reverseGeocoderHandler);
+        }
+        if (locationProviderHandler != null) {
+            pipeline.addLast("location", locationProviderHandler);
+        }
+        pipeline.addLast("remoteAddress", new RemoteAddressHandler());
+
+        addDynamicHandlers(pipeline);
+
+        if (filterHandler != null) {
+            pipeline.addLast("filter", filterHandler);
+        }
+
+        if (Context.getDataManager() != null) {
+            pipeline.addLast("dataHandler", new DefaultDataHandler());
+        }
+
+        if (Context.getConfig().getBoolean("forward.enable")) {
+            pipeline.addLast("webHandler", new WebDataHandler(Context.getConfig().getString("forward.url")));
+        }
+
+        if (commandResultEventHandler != null) {
+            pipeline.addLast("CommandResultEventHandler", commandResultEventHandler);
+        }
+
+        if (overspeedEventHandler != null) {
+            pipeline.addLast("OverspeedEventHandler", overspeedEventHandler);
+        }
+
+        if (motionEventHandler != null) {
+            pipeline.addLast("MotionEventHandler", motionEventHandler);
+        }
+
+        pipeline.addLast("mainHandler", new MainEventHandler());
         return pipeline;
     }
 
+    private void addDynamicHandlers(ChannelPipeline pipeline) {
+        if (Context.getConfig().hasKey("extra.handlers")) {
+            String[] handlers = Context.getConfig().getString("extra.handlers").split(",");
+            for (int i = 0; i < handlers.length; i++) {
+                try {
+                    pipeline.addLast("extraHandler." + i, (ChannelHandler) Class.forName(handlers[i]).newInstance());
+                } catch (ClassNotFoundException | InstantiationException | IllegalAccessException error) {
+                    Log.warning(error);
+                }
+            }
+        }
+    }
 }

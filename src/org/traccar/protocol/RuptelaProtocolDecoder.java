@@ -15,118 +15,107 @@
  */
 package org.traccar.protocol;
 
-import java.util.Date;
-import java.util.LinkedList;
-import java.util.List;
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
-import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
+import org.traccar.helper.UnitsConverter;
 import org.traccar.model.Position;
 
+import java.net.SocketAddress;
+import java.util.Date;
+import java.util.LinkedList;
+import java.util.List;
+
 public class RuptelaProtocolDecoder extends BaseProtocolDecoder {
-    
-    public RuptelaProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
+
+    public RuptelaProtocolDecoder(RuptelaProtocol protocol) {
+        super(protocol);
     }
 
     private static final int COMMAND_RECORDS = 0x01;
-    
+
     @Override
-    protected Object decode(ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
+    protected Object decode(
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
 
         ChannelBuffer buf = (ChannelBuffer) msg;
 
         buf.readUnsignedShort(); // data length
 
-        // Identify device
         String imei = String.format("%015d", buf.readLong());
-        long deviceId;
-        try {
-            deviceId = getDataManager().getDeviceByImei(imei).getId();
-        } catch(Exception error) {
-            Log.warning("Unknown device - " + imei);
+        if (!identify(imei, channel, remoteAddress)) {
             return null;
         }
-        
+
         int type = buf.readUnsignedByte();
-        
+
         if (type == COMMAND_RECORDS) {
-            List<Position> positions = new LinkedList<Position>();
+            List<Position> positions = new LinkedList<>();
 
             buf.readUnsignedByte(); // records left
             int count = buf.readUnsignedByte();
 
             for (int i = 0; i < count; i++) {
                 Position position = new Position();
-                ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("ruptela");
-                position.setDeviceId(deviceId);
+                position.setProtocol(getProtocolName());
+                position.setDeviceId(getDeviceId());
 
-                // Time
                 position.setTime(new Date(buf.readUnsignedInt() * 1000));
                 buf.readUnsignedByte(); // timestamp extension
 
                 buf.readUnsignedByte(); // priority (reserved)
-                
-                // Location
+
                 position.setLongitude(buf.readInt() / 10000000.0);
                 position.setLatitude(buf.readInt() / 10000000.0);
                 position.setAltitude(buf.readUnsignedShort() / 10.0);
                 position.setCourse(buf.readUnsignedShort() / 100.0);
 
-                // Validity
                 int satellites = buf.readUnsignedByte();
-                extendedInfo.set("satellites", satellites);
+                position.set(Position.KEY_SATELLITES, satellites);
                 position.setValid(satellites >= 3);
 
-                position.setSpeed(buf.readUnsignedShort() * 0.539957);
+                position.setSpeed(UnitsConverter.knotsFromKph(buf.readUnsignedShort()));
 
-                extendedInfo.set("hdop", buf.readUnsignedByte() / 10.0);
+                position.set(Position.KEY_HDOP, buf.readUnsignedByte() / 10.0);
 
                 buf.readUnsignedByte();
 
                 // Read 1 byte data
                 int cnt = buf.readUnsignedByte();
                 for (int j = 0; j < cnt; j++) {
-                    extendedInfo.set("io" + buf.readUnsignedByte(), buf.readUnsignedByte());
+                    position.set(Position.PREFIX_IO + buf.readUnsignedByte(), buf.readUnsignedByte());
                 }
 
                 // Read 2 byte data
                 cnt = buf.readUnsignedByte();
                 for (int j = 0; j < cnt; j++) {
-                    extendedInfo.set("io" + buf.readUnsignedByte(), buf.readUnsignedShort());
+                    position.set(Position.PREFIX_IO + buf.readUnsignedByte(), buf.readUnsignedShort());
                 }
 
                 // Read 4 byte data
                 cnt = buf.readUnsignedByte();
                 for (int j = 0; j < cnt; j++) {
-                    extendedInfo.set("io" + buf.readUnsignedByte(), buf.readUnsignedInt());
+                    position.set(Position.PREFIX_IO + buf.readUnsignedByte(), buf.readUnsignedInt());
                 }
 
                 // Read 8 byte data
                 cnt = buf.readUnsignedByte();
                 for (int j = 0; j < cnt; j++) {
-                    extendedInfo.set("io" + buf.readUnsignedByte(), buf.readLong());
+                    position.set(Position.PREFIX_IO + buf.readUnsignedByte(), buf.readLong());
                 }
 
-                position.setExtendedInfo(extendedInfo.toString());
                 positions.add(position);
             }
 
-            // Acknowledgement
             if (channel != null) {
-                byte[] response = {0x00, 0x02, 0x64, 0x01, 0x13, (byte)0xbc};
-                channel.write(ChannelBuffers.wrappedBuffer(response));
+                byte[] response = {0x00, 0x02, 0x64, 0x01, 0x13, (byte) 0xbc};
+                channel.write(ChannelBuffers.wrappedBuffer(response)); // acknowledgement
             }
 
             return positions;
         }
-        
+
         return null;
     }
 

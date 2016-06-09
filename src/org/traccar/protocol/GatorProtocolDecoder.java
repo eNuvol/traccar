@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 Anton Tananaev (anton.tananaev@gmail.com)
+ * Copyright 2013 - 2014 Anton Tananaev (anton.tananaev@gmail.com)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,105 +15,94 @@
  */
 package org.traccar.protocol;
 
-import java.util.Calendar;
-import java.util.TimeZone;
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
-import org.traccar.helper.ChannelBufferTools;
-import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
+import org.traccar.helper.BcdUtil;
+import org.traccar.helper.DateBuilder;
+import org.traccar.helper.UnitsConverter;
 import org.traccar.model.Position;
+
+import java.net.SocketAddress;
 
 public class GatorProtocolDecoder extends BaseProtocolDecoder {
 
-    public GatorProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
+    public GatorProtocolDecoder(GatorProtocol protocol) {
+        super(protocol);
     }
 
-    private static final int PACKET_HEARTBEAT = 0x21;
-    private static final int PACKET_POSITION_DATA = 0x80;
-    private static final int PACKET_ROLLCALL_RESPONSE = 0x81;
-    private static final int PACKET_ALARM_DATA = 0x82;
-    private static final int PACKET_TERMINAL_STATUS = 0x83;
-    private static final int PACKET_MESSAGE = 0x84;
-    private static final int PACKET_TERMINAL_ANSWER = 0x85;
-    private static final int PACKET_BLIND_AREA = 0x8E;
-    private static final int PACKET_PICTURE_FRAME = 0x54;
-    private static final int PACKET_CAMERA_RESPONSE = 0x56;
-    private static final int PACKET_PICTURE_DATA = 0x57;
-    
+    public static final int MSG_HEARTBEAT = 0x21;
+    public static final int MSG_POSITION_DATA = 0x80;
+    public static final int MSG_ROLLCALL_RESPONSE = 0x81;
+    public static final int MSG_ALARM_DATA = 0x82;
+    public static final int MSG_TERMINAL_STATUS = 0x83;
+    public static final int MSG_MESSAGE = 0x84;
+    public static final int MSG_TERMINAL_ANSWER = 0x85;
+    public static final int MSG_BLIND_AREA = 0x8E;
+    public static final int MSG_PICTURE_FRAME = 0x54;
+    public static final int MSG_CAMERA_RESPONSE = 0x56;
+    public static final int MSG_PICTURE_DATA = 0x57;
+
+    public static String decodeId(int b1, int b2, int b3, int b4) {
+
+        int d1 = 30 + ((b1 >> 7) << 3) + ((b2 >> 7) << 2) + ((b3 >> 7) << 1) + (b4 >> 7);
+        int d2 = b1 & 0x7f;
+        int d3 = b2 & 0x7f;
+        int d4 = b3 & 0x7f;
+        int d5 = b4 & 0x7f;
+
+        return String.format("%02d%02d%02d%02d%02d", d1, d2, d3, d4, d5);
+    }
+
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
-        
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
+
         ChannelBuffer buf = (ChannelBuffer) msg;
 
         buf.skipBytes(2); // header
         int type = buf.readUnsignedByte();
         buf.readUnsignedShort(); // length
 
-        // Pseudo IP address
-        String id = String.valueOf(buf.readUnsignedInt());
-        
-        if (type == PACKET_POSITION_DATA ||
-            type == PACKET_ROLLCALL_RESPONSE ||
-            type == PACKET_ALARM_DATA ||
-            type == PACKET_BLIND_AREA) {
-            
-            // Create new position
+        String id = decodeId(
+                buf.readUnsignedByte(), buf.readUnsignedByte(),
+                buf.readUnsignedByte(), buf.readUnsignedByte());
+
+        if (type == MSG_POSITION_DATA || type == MSG_ROLLCALL_RESPONSE
+                || type == MSG_ALARM_DATA || type == MSG_BLIND_AREA) {
+
             Position position = new Position();
-            ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("gator");
+            position.setProtocol(getProtocolName());
 
-            // Identification
-            try {
-                position.setDeviceId(getDataManager().getDeviceByImei(id).getId());
-            } catch(Exception error) {
-                Log.warning("Unknown device - " + id);
+            if (!identify("1" + id, channel, remoteAddress, false) && !identify(id, channel, remoteAddress)) {
+                return null;
             }
-            
-            // Date and time
-            Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-            time.clear();
-            time.set(Calendar.YEAR, 2000 + ChannelBufferTools.readHexInteger(buf, 2));
-            time.set(Calendar.MONTH, ChannelBufferTools.readHexInteger(buf, 2) - 1);
-            time.set(Calendar.DAY_OF_MONTH, ChannelBufferTools.readHexInteger(buf, 2));
-            time.set(Calendar.HOUR, ChannelBufferTools.readHexInteger(buf, 2));
-            time.set(Calendar.MINUTE, ChannelBufferTools.readHexInteger(buf, 2));
-            time.set(Calendar.SECOND, ChannelBufferTools.readHexInteger(buf, 2));
-            position.setTime(time.getTime());
+            position.setDeviceId(getDeviceId());
 
-            // Location
-            position.setLatitude(ChannelBufferTools.readCoordinate(buf));
-            position.setLongitude(ChannelBufferTools.readCoordinate(buf));
-            position.setSpeed(ChannelBufferTools.readHexInteger(buf, 4) * 0.539957);
-            position.setCourse((double) ChannelBufferTools.readHexInteger(buf, 4));
-            position.setAltitude(0.0);
+            DateBuilder dateBuilder = new DateBuilder()
+                    .setYear(BcdUtil.readInteger(buf, 2))
+                    .setMonth(BcdUtil.readInteger(buf, 2))
+                    .setDay(BcdUtil.readInteger(buf, 2))
+                    .setHour(BcdUtil.readInteger(buf, 2))
+                    .setMinute(BcdUtil.readInteger(buf, 2))
+                    .setSecond(BcdUtil.readInteger(buf, 2));
+            position.setTime(dateBuilder.getDate());
 
-            // Flags
+            position.setLatitude(BcdUtil.readCoordinate(buf));
+            position.setLongitude(BcdUtil.readCoordinate(buf));
+            position.setSpeed(UnitsConverter.knotsFromKph(BcdUtil.readInteger(buf, 4)));
+            position.setCourse(BcdUtil.readInteger(buf, 4));
+
             int flags = buf.readUnsignedByte();
             position.setValid((flags & 0x80) != 0);
-            extendedInfo.set("satellites", flags & 0x0f);
+            position.set(Position.KEY_SATELLITES, flags & 0x0f);
 
-            // Status
-            extendedInfo.set("status", buf.readUnsignedByte());
+            position.set(Position.KEY_STATUS, buf.readUnsignedByte());
+            position.set("key", buf.readUnsignedByte());
+            position.set("oil", buf.readUnsignedShort() / 10.0);
+            position.set(Position.KEY_POWER, buf.readUnsignedByte() + buf.readUnsignedByte() / 100.0);
+            position.set(Position.KEY_ODOMETER, buf.readUnsignedInt());
 
-            // Key switch
-            extendedInfo.set("key", buf.readUnsignedByte());
-
-            // Oil
-            extendedInfo.set("oil", buf.readUnsignedShort() / 10.0);
-
-            // Power
-            extendedInfo.set("power", buf.readUnsignedByte() + buf.readUnsignedByte() / 100.0);
-
-            // Milage
-            extendedInfo.set("milage", buf.readUnsignedInt());
-
-            position.setExtendedInfo(extendedInfo.toString());
             return position;
         }
 

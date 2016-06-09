@@ -1,5 +1,5 @@
 /*
- * Copyright 2012 - 2013 Anton Tananaev (anton.tananaev@gmail.com)
+ * Copyright 2012 - 2015 Anton Tananaev (anton.tananaev@gmail.com)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,217 +15,175 @@
  */
 package org.traccar.protocol;
 
-import java.nio.charset.Charset;
-import java.util.Calendar;
-import java.util.TimeZone;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import org.jboss.netty.buffer.ChannelBuffer;
+import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.ServerManager;
-import org.traccar.helper.ChannelBufferTools;
-import org.traccar.helper.Log;
-import org.traccar.model.ExtendedInfoFormatter;
+import org.traccar.helper.BcdUtil;
+import org.traccar.helper.DateBuilder;
+import org.traccar.helper.Parser;
+import org.traccar.helper.PatternBuilder;
+import org.traccar.helper.UnitsConverter;
 import org.traccar.model.Position;
+
+import java.net.SocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.regex.Pattern;
 
 public class Jt600ProtocolDecoder extends BaseProtocolDecoder {
 
-    public Jt600ProtocolDecoder(ServerManager serverManager) {
-        super(serverManager);
+    public Jt600ProtocolDecoder(Jt600Protocol protocol) {
+        super(protocol);
     }
 
-    private Position decodeNormalMessage(ChannelBuffer buf) throws Exception {
+    private static double convertCoordinate(int raw) {
+        int degrees = raw / 1000000;
+        double minutes = (raw % 1000000) / 10000.0;
+        return degrees + minutes / 60;
+    }
+
+    private Position decodeNormalMessage(ChannelBuffer buf, Channel channel, SocketAddress remoteAddress) {
 
         Position position = new Position();
-        ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("jt600");
+        position.setProtocol(getProtocolName());
 
         buf.readByte(); // header
 
-        // Get device by identifier
-        String id = Long.valueOf(ChannelBufferTools.readHexString(buf, 10)).toString();
-        try {
-            position.setDeviceId(getDataManager().getDeviceByImei(id).getId());
-        } catch(Exception error) {
-            Log.warning("Unknown device - " + id);
-            //return null;
+        String id = String.valueOf(Long.parseLong(ChannelBuffers.hexDump(buf.readBytes(5))));
+        if (!identify(id, channel, remoteAddress)) {
+            return null;
         }
+        position.setDeviceId(getDeviceId());
 
-        // Protocol and type
-        int version = ChannelBufferTools.readHexInteger(buf, 1);
-        int type = buf.readUnsignedByte() & 0xf;
-
+        int version = BcdUtil.readInteger(buf, 1);
+        buf.readUnsignedByte(); // type
         buf.readBytes(2); // length
 
-        // Time
-        Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-        time.clear();
-        time.set(Calendar.DAY_OF_MONTH, ChannelBufferTools.readHexInteger(buf, 2));
-        time.set(Calendar.MONTH, ChannelBufferTools.readHexInteger(buf, 2) - 1);
-        time.set(Calendar.YEAR, 2000 + ChannelBufferTools.readHexInteger(buf, 2));
-        time.set(Calendar.HOUR, ChannelBufferTools.readHexInteger(buf, 2));
-        time.set(Calendar.MINUTE, ChannelBufferTools.readHexInteger(buf, 2));
-        time.set(Calendar.SECOND, ChannelBufferTools.readHexInteger(buf, 2));
-        position.setTime(time.getTime());
+        DateBuilder dateBuilder = new DateBuilder()
+                .setDay(BcdUtil.readInteger(buf, 2))
+                .setMonth(BcdUtil.readInteger(buf, 2))
+                .setYear(BcdUtil.readInteger(buf, 2))
+                .setHour(BcdUtil.readInteger(buf, 2))
+                .setMinute(BcdUtil.readInteger(buf, 2))
+                .setSecond(BcdUtil.readInteger(buf, 2));
+        position.setTime(dateBuilder.getDate());
 
-        // Coordinates
-        int temp = ChannelBufferTools.readHexInteger(buf, 8);
-        double latitude = temp % 1000000;
-        latitude /= 60 * 10000;
-        latitude += temp / 1000000;
-        temp = ChannelBufferTools.readHexInteger(buf, 9);
-        double longitude = temp % 1000000;
-        longitude /= 60 * 10000;
-        longitude += temp / 1000000;
+        double latitude = convertCoordinate(BcdUtil.readInteger(buf, 8));
+        double longitude = convertCoordinate(BcdUtil.readInteger(buf, 9));
 
-        // Flags
         byte flags = buf.readByte();
         position.setValid((flags & 0x1) == 0x1);
-        if ((flags & 0x2) == 0) latitude = -latitude;
+        if ((flags & 0x2) == 0) {
+            latitude = -latitude;
+        }
         position.setLatitude(latitude);
-        if ((flags & 0x4) == 0) longitude = -longitude;
+        if ((flags & 0x4) == 0) {
+            longitude = -longitude;
+        }
         position.setLongitude(longitude);
 
-        // Speed
-        position.setSpeed((double) ChannelBufferTools.readHexInteger(buf, 2));
-
-        // Course
+        position.setSpeed(BcdUtil.readInteger(buf, 2));
         position.setCourse(buf.readUnsignedByte() * 2.0);
-        
-        if (version == 1) {
-            
-            extendedInfo.set("satellites", buf.readUnsignedByte());
 
-            // Power
-            extendedInfo.set("power", buf.readUnsignedByte());
+        if (version == 1) {
+
+            position.set(Position.KEY_SATELLITES, buf.readUnsignedByte());
+            position.set(Position.KEY_POWER, buf.readUnsignedByte());
 
             buf.readByte(); // other flags and sensors
 
-            // Altitude
-            position.setAltitude((double) buf.readUnsignedShort());
+            position.setAltitude(buf.readUnsignedShort());
 
-            extendedInfo.set("cell", buf.readUnsignedShort());
-            extendedInfo.set("lac", buf.readUnsignedShort());
-            extendedInfo.set("gsm", buf.readUnsignedByte());
+            int cid = buf.readUnsignedShort();
+            int lac = buf.readUnsignedShort();
+            if (cid != 0 && lac != 0) {
+                position.set(Position.KEY_CID, cid);
+                position.set(Position.KEY_LAC, lac);
+            }
+
+            position.set(Position.KEY_GSM, buf.readUnsignedByte());
 
         } else if (version == 2) {
 
-            position.setAltitude(0.0);
-
             int fuel = buf.readUnsignedByte() << 8;
 
-            extendedInfo.set("status", buf.readUnsignedInt());
-            extendedInfo.set("milage", buf.readUnsignedInt());
+            position.set(Position.KEY_STATUS, buf.readUnsignedInt());
+            position.set(Position.KEY_ODOMETER, buf.readUnsignedInt());
 
             fuel += buf.readUnsignedByte();
-            extendedInfo.set("fuel", fuel);
+            position.set(Position.KEY_FUEL, fuel);
 
         }
-        
-        position.setExtendedInfo(extendedInfo.toString());
+
         return position;
     }
 
-    private static final Pattern pattern = Pattern.compile(
-            "\\(" +
-            "([\\d]+)," +                // Id
-            "W01," +                     // Type
-            "(\\d{3})(\\d{2}.\\d{4})," + // Longitude (DDDMM.MMMM)
-            "([EW])," +
-            "(\\d{2})(\\d{2}.\\d{4})," + // Latitude (DDMM.MMMM)
-            "([NS])," +
-            "([AV])," +                  // Validity
-            "(\\d{2})(\\d{2})(\\d{2})," + // Date (DDMMYY)
-            "(\\d{2})(\\d{2})(\\d{2})," + // Time (HHMMSS)
-            "(\\d+)," +                  // Speed (km/h)
-            "(\\d+)," +                  // Course
-            "(\\d+)," +                  // Power
-            "(\\d+)," +                  // GPS signal
-            "(\\d+)," +                  // GSM signal
-            "(\\d+)," +                  // Alert Type
-            ".*\\)");
+    private static final Pattern PATTERN = new PatternBuilder()
+            .text("(")
+            .number("(d+),")                     // id
+            .text("W01,")                        // type
+            .number("(ddd)(dd.dddd),")           // longitude
+            .expression("([EW]),")
+            .number("(dd)(dd.dddd),")            // latitude
+            .expression("([NS]),")
+            .expression("([AV]),")               // validity
+            .number("(dd)(dd)(dd),")             // date (ddmmyy)
+            .number("(dd)(dd)(dd),")             // time
+            .number("(d+),")                     // speed
+            .number("(d+),")                     // course
+            .number("(d+),")                     // power
+            .number("(d+),")                     // gps signal
+            .number("(d+),")                     // gsm signal
+            .number("(d+),")                     // alert type
+            .any()
+            .text(")")
+            .compile();
 
-    private Position decodeAlertMessage(ChannelBuffer buf) throws Exception {
+    private Position decodeAlertMessage(ChannelBuffer buf, Channel channel, SocketAddress remoteAddress) {
 
-        String message = buf.toString(Charset.defaultCharset());
-
-        // Parse message
-        Matcher parser = pattern.matcher(message);
+        Parser parser = new Parser(PATTERN, buf.toString(StandardCharsets.US_ASCII));
         if (!parser.matches()) {
             return null;
         }
 
-        // Create new position
         Position position = new Position();
-        ExtendedInfoFormatter extendedInfo = new ExtendedInfoFormatter("jt600");
-        extendedInfo.set("alert", "true");
-        Integer index = 1;
+        position.setProtocol(getProtocolName());
 
-        // Get device by identifier
-        String id = parser.group(index++);
-        try {
-            position.setDeviceId(getDataManager().getDeviceByImei(id).getId());
-        } catch(Exception error) {
-            Log.warning("Unknown device - " + id);
+        position.set(Position.KEY_ALARM, true);
+
+        if (!identify(parser.next(), channel, remoteAddress)) {
             return null;
         }
+        position.setDeviceId(getDeviceId());
 
-        // Longitude
-        Double longitude = Double.valueOf(parser.group(index++));
-        longitude += Double.valueOf(parser.group(index++)) / 60;
-        if (parser.group(index++).compareTo("W") == 0) longitude = -longitude;
-        position.setLongitude(longitude);
+        position.setLongitude(parser.nextCoordinate());
+        position.setLatitude(parser.nextCoordinate());
+        position.setValid(parser.next().equals("A"));
 
-        // Latitude
-        Double latitude = Double.valueOf(parser.group(index++));
-        latitude += Double.valueOf(parser.group(index++)) / 60;
-        if (parser.group(index++).compareTo("S") == 0) latitude = -latitude;
-        position.setLatitude(latitude);
+        DateBuilder dateBuilder = new DateBuilder()
+                .setDateReverse(parser.nextInt(), parser.nextInt(), parser.nextInt())
+                .setTime(parser.nextInt(), parser.nextInt(), parser.nextInt());
+        position.setTime(dateBuilder.getDate());
 
-        // Validity
-        position.setValid(parser.group(index++).compareTo("A") == 0);
+        position.setSpeed(UnitsConverter.knotsFromKph(parser.nextDouble()));
+        position.setCourse(parser.nextDouble());
 
-        // Time
-        Calendar time = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-        time.clear();
-        time.set(Calendar.DAY_OF_MONTH, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.MONTH, Integer.valueOf(parser.group(index++)) - 1);
-        time.set(Calendar.YEAR, 2000 + Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.HOUR, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.MINUTE, Integer.valueOf(parser.group(index++)));
-        time.set(Calendar.SECOND, Integer.valueOf(parser.group(index++)));
-        position.setTime(time.getTime());
+        position.set(Position.KEY_POWER, parser.nextDouble());
 
-        // Speed
-        position.setSpeed(Double.valueOf(parser.group(index++)));
-
-        // Course
-        position.setCourse(Double.valueOf(parser.group(index++)));
-        
-        // Altitude
-        position.setAltitude(0.0);
-
-        // Power
-        extendedInfo.set("power", Double.valueOf(parser.group(index++)));
-
-        position.setExtendedInfo(extendedInfo.toString());
         return position;
     }
 
     @Override
     protected Object decode(
-            ChannelHandlerContext ctx, Channel channel, Object msg)
-            throws Exception {
+            Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
 
         ChannelBuffer buf = (ChannelBuffer) msg;
         char first = (char) buf.getByte(0);
 
-        // Check message type
         if (first == '$') {
-            return decodeNormalMessage(buf);
+            return decodeNormalMessage(buf, channel, remoteAddress);
         } else if (first == '(') {
-            return decodeAlertMessage(buf);
+            return decodeAlertMessage(buf, channel, remoteAddress);
         }
 
         return null;
